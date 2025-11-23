@@ -16,7 +16,7 @@ from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
 setup(
-    name="storage_offload",
+    name="llmd_fs_connector",
     packages=find_packages("src"),
     package_dir={"": "src"},
     ext_modules=[
