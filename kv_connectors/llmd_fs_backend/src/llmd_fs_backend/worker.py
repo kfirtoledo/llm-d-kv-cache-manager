@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 # Base Storage Offloading Handler
 # ----------------------------------------------------------------------
 DEFAULT_MAX_PINNED_MEMORY_GB = 150
-DEFAULT_MAX_THREADS_PER_GPU = 64
+DEFAULT_MAX_THREADS_PER_GPU = 150
 
 class StorageOffloadingHandler(OffloadingHandler):
     """Base handler with common helpers for Storage offloading."""

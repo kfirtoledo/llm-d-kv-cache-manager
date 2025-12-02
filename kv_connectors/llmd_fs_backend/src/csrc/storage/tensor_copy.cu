@@ -416,7 +416,7 @@ bool copy_buffer_to_gpu_tensors(torch::Tensor cpu_buf,
     auto* cpu_base = cpu_buf.data_ptr<uint8_t>();
 
     // Check environment variable to determine copy method (default: kernel for READ)
-    bool use_kernel = get_env_flag("USE_KERNEL_COPY_READ", true);
+    bool use_kernel = get_env_flag("USE_KERNEL_COPY_READ", false);
     bool is_put = false;
 
     // Execute the copy operation
