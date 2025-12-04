@@ -71,10 +71,10 @@ ConnectorConfig g_connector_config;
 // Initialize resources with pre-allocation
 // -------------------------------
 
-// Initialize IO threads, CUDA streams, and pinned memory pool
+// Initialize IO threads, CUDA streams, and staging memory pool
 void init_resources(int io_threads,
-                    size_t pinned_buffer_size_mb,
-                    size_t max_pinned_memory_gb,
+                    size_t staging_buffer_size_mb,
+                    size_t max_staging_memory_gb,
                     int tp_rank,
                     bool kv_before_blocks,
                     bool layers_before_blocks,
@@ -94,17 +94,17 @@ void init_resources(int io_threads,
         cudaGetDevice(&device_id);
 
         std::cout << "[INFO] Initializing ThreadPool with " << io_threads << " threads on device " << device_id << ", "
-                  << pinned_buffer_size_mb << " MB pinned buffer per thread, " << max_pinned_memory_gb << " GB max pinned memory\n";
+                  << staging_buffer_size_mb << " MB staging buffer per thread, " << max_staging_memory_gb << " GB max staging memory\n";
 
         // Enable GPU access to mapped host memory (needed only for cudaHostAllocMapped before any CUDA context)
         cudaSetDeviceFlags(cudaDeviceMapHost);
         int gpu_numa = get_gpu_numa_node(device_id);
         numa_set_preferred(gpu_numa);
-        // Pre-allocate pinned buffers before launching threads
-        preallocate_pinned_buffers(io_threads, pinned_buffer_size_mb);
+        // Pre-allocate staging buffers before launching threads
+        preallocate_staging_buffers(io_threads, staging_buffer_size_mb);
 
         // Pass device_id to thread pool
-        g_io_pool = std::make_unique<ThreadPool>(io_threads, pinned_buffer_size_mb, tp_rank, device_id);
+        g_io_pool = std::make_unique<ThreadPool>(io_threads, staging_buffer_size_mb, tp_rank, device_id);
 
         // Create dedicated streams for each thread on the current device
         g_streams_pool.clear();
@@ -150,15 +150,15 @@ std::vector<std::pair<int, bool>> get_finished() {
     return results;
 }
 
-// Release IO threads, CUDA streams, and pinned buffer
+// Release IO threads, CUDA streams, and staging buffer
 void cleanup_resources() {
     g_io_pool.reset();
     g_streams_pool.clear();
 
-    if (t_pinned_buffer.ptr) {
-        cudaFreeHost(t_pinned_buffer.ptr);
-        t_pinned_buffer.ptr = nullptr;
-        t_pinned_buffer.size = 0;
+    if (t_staging_buffer.ptr) {
+        cudaFreeHost(t_staging_buffer.ptr);
+        t_staging_buffer.ptr = nullptr;
+        t_staging_buffer.size = 0;
     }
 }
 
@@ -207,7 +207,7 @@ bool transfer_async_put(int job_id,
                 // Use reference to avoid copy - dereference shared_ptr
                 const auto& src = *shared_src_tensors;
 
-                // Stage 1: copy tensors from GPU to pinned CPU buffer.
+                // Stage 1: copy tensors from GPU to staging CPU buffer.
                 auto host_buf = TIME_EXPR("write phase 1: copy_gpu_tensors_to_buffer",
                                           copy_gpu_tensors_to_buffer(src, bids, *thread_stream),
                                           "file: " + target);
@@ -217,9 +217,9 @@ bool transfer_async_put(int job_id,
                     std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
                 }
 
-                // Stage 2: Write the pinned buffer to disk.
-                bool ok = TIME_EXPR("write phase 2: write_file_to_disk",
-                                    write_file_to_disk(target, host_buf),
+                // Stage 2: Write the staging buffer to disk.
+                bool ok = TIME_EXPR("write phase 2: write_tensor_to_file",
+                                    write_tensor_to_file(host_buf, target),
                                     ("file:" + target + " size:" + std::to_string(host_buf.nbytes())));
 
                 if (!ok) std::cerr << "[ERROR] PUT failed during file write: " << target << "\n";
@@ -277,36 +277,30 @@ bool transfer_async_get(int job_id,
             auto current_stream = at::cuda::getCurrentCUDAStream();
             at::cuda::setCurrentCUDAStream(*thread_stream);
 
-            // Stage 1: Read file to pinned CPU buffer.
-            bool stage1_ok = false;
+            // Stage 1: Read file to staging CPU buffer.
+            bool success = false;
             torch::Tensor host_buf;
-            try {
-                // Read data from disk into pinned memory tensor.
-                host_buf = TIME_EXPR("read phase 1: read_file_from_disk", read_file_from_disk(src_file), ("file:" + src_file));
-                stage1_ok = true;
-            } catch (const std::exception& e) {
-                std::cerr << "[ERROR] Stage1 read_file_from_disk failed for " << src_file << ": " << e.what() << std::endl;
-            } catch (...) {
-                std::cerr << "[ERROR] Stage1 unknown failure for " << src_file << std::endl;
-            }
-
-            // Stage 2:  copy tensors from pinned CPU buffer to GPU.
-            bool ok = false;
-            if (stage1_ok) {
-                try {
-                    // Perform asynchronous GPU copy and tensor swap.
-                    ok = TIME_EXPR("read phase 2: copy_buffer_to_gpu_tensors",
-                                   copy_buffer_to_gpu_tensors(host_buf, block_ids, dst_tensors, gpu_blocks_per_file, *thread_stream),
-                                   "file: " + src_file);
+            // Read data from disk into a tensor.
+            success = TIME_EXPR("read phase 1: read_tensor_from_file", read_tensor_from_file(src_file, host_buf), ("file:" + src_file));
+            if (!success) {
+                std::cerr << "[ERROR] Stage1 read_tensor_from_file failed for " << src_file << std::endl;
+            } else {
+                try {  // Stage 2:  copy tensors from staging CPU buffer to GPU.
+                       // Perform asynchronous GPU copy and tensor swap.
+                    success = TIME_EXPR("read phase 2: copy_buffer_to_gpu_tensors",
+                                        copy_buffer_to_gpu_tensors(host_buf, block_ids, dst_tensors, gpu_blocks_per_file, *thread_stream),
+                                        "file: " + src_file);
                     cudaError_t err = cudaStreamSynchronize(thread_stream->stream());
                     if (err != cudaSuccess) {
                         std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
-                        ok = false;
+                        success = false;
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "[ERROR] Stage2 copy_and_swap failed for " << src_file << ": " << e.what() << std::endl;
+                    success = false;
                 } catch (...) {
                     std::cerr << "[ERROR] Stage2 unknown failure for " << src_file << std::endl;
+                    success = false;
                 }
             }
 
@@ -314,8 +308,8 @@ bool transfer_async_get(int job_id,
             // Synchronize only this thread's CUDA stream.
             at::cuda::setCurrentCUDAStream(current_stream);
             job_state->completed_tasks.fetch_add(1);
-            if (!ok) job_state->all_success = false;
-            return ok;
+            if (!success) job_state->all_success = false;
+            return success;
         });
 
         // Convert std::future → std::shared_future- is copyable and can be waited on by multiple threads.
@@ -334,8 +328,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("init_resources",
           &init_resources,
           py::arg("io_threads"),
-          py::arg("pinned_buffer_size_mb"),
-          py::arg("max_pinned_memory_gb"),
+          py::arg("staging_buffer_size_mb"),
+          py::arg("max_staging_memory_gb"),
           py::arg("tp_rank"),
           py::arg("kv_before_blocks"),
           py::arg("layers_before_blocks"),
