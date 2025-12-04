@@ -7,8 +7,8 @@
 #include <iostream>
 
 #include "tensor_copy.hpp"
-#include "buffer.hpp"       // for get_thread_local_pinned
-#include "debug_utils.hpp"  // for DEBUG_PRINT
+#include "buffer.hpp"
+#include "debug_utils.hpp"
 
 //----------------------------------------------------------------------
 // Helper Structures and Functions
@@ -263,7 +263,7 @@ void copy_via_kernel(uint8_t* cpu_base,
     // Wrap CPU offsets in tensor and copy to GPU for kernel access
     torch::Tensor cpu_offsets_tensor = to_gpu_tensor(cpu_offsets);
 
-    // Map pinned CPU memory to device pointer (required for GPU kernel to write to host memory - zero-copy)
+    // Map CPU memory to device pointer (required for GPU kernel to write to host memory - zero-copy)
     uint8_t* cpu_base_dev = cpu_base;
     if (is_put) {
         cudaError_t map_err = cudaHostGetDevicePointer(&cpu_base_dev, cpu_base, 0);
@@ -342,8 +342,8 @@ void transfer_kv_blocks(uint8_t* cpu_base,
 // GPU → Storage (PUT)
 //----------------------------------------------------------------------
 
-// Copy selected GPU K/V blocks into a single pinned CPU buffer.
-// The pinned buffer is returned as a CPU tensor (no copy, just a view).
+// Copy selected GPU K/V blocks into a single staging CPU buffer.
+// The staging buffer is returned as a CPU tensor (no copy, just a view).
 torch::Tensor copy_gpu_tensors_to_buffer(const std::vector<torch::Tensor>& src_tensors,
                                          const std::vector<int64_t>& block_ids_list,
                                          const c10::cuda::CUDAStream& stream) {
@@ -358,21 +358,21 @@ torch::Tensor copy_gpu_tensors_to_buffer(const std::vector<torch::Tensor>& src_t
                                            g_connector_config.layers_before_blocks);
     const int num_layers = static_cast<int>(src_tensors.size());
 
-    // Total required pinned memory
+    // Total required staging memory
     const size_t total_bytes = block_ids_list.size() * num_layers * layout.bytes_per_block;
 
-    // Fetch or allocate thread-local pinned buffer
-    auto [pinned_ptr, pinned_size] = get_thread_local_pinned(total_bytes);
-    TORCH_CHECK(pinned_size >= total_bytes, "Pinned buffer too small: need ", total_bytes, " got ", pinned_size);
+    // Fetch or allocate thread-local staging buffer
+    StagingBufferInfo buf = get_thread_local_staging_buffer(total_bytes);
+    TORCH_CHECK(buf.size >= total_bytes, "staging buffer too small: need ", total_bytes, " got ", buf.size);
 
     auto dtype = ref.dtype();
     const int64_t total_elements = static_cast<int64_t>(total_bytes / layout.elem_size);
 
-    // Wrap pinned memory as tensor view (no copy)
+    // Wrap staging buffer as tensor view (no copy)
     torch::Tensor result_cpu =
-        torch::from_blob(pinned_ptr, {total_elements}, torch::TensorOptions().dtype(dtype).device(torch::kCPU).pinned_memory(true));
+        torch::from_blob(buf.ptr, {total_elements}, torch::TensorOptions().dtype(dtype).device(torch::kCPU).pinned_memory(true));
 
-    auto* cpu_base = static_cast<uint8_t*>(pinned_ptr);
+    auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
 
     // Check environment variable to determine copy method
     bool use_kernel = get_env_flag("USE_KERNEL_COPY_WRITE", false);
@@ -403,7 +403,7 @@ bool copy_buffer_to_gpu_tensors(torch::Tensor cpu_buf,
     TORCH_CHECK(ref.is_contiguous(), "dst_tensors must be contiguous");
     TORCH_CHECK(cpu_buf.is_contiguous(), "cpu buffer must be contiguous");
 
-    // CRITICAL: Verify cpu_buf is pinned memory
+    // Verify cpu_buf is pinned memory
     TORCH_CHECK(cpu_buf.is_pinned(), "cpu_buf must be pinned memory for kernel-based copy");
 
     // Extract tensor geometry
