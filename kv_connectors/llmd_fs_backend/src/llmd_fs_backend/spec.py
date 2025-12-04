@@ -26,7 +26,7 @@ from vllm.attention import AttentionBackend
 from llmd_fs_backend.worker import (
     GPUStorageOffloadingHandler,
     StorageGPUOffloadingHandler,
-    DEFAULT_MAX_PINNED_MEMORY_GB,
+    DEFAULT_MAX_STAGING_MEMORY_GB,
     DEFAULT_MAX_THREADS_PER_GPU
 )
 
@@ -46,7 +46,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
 
         self.threads_per_gpu      = int(self.extra_config.get("threads_per_gpu", DEFAULT_MAX_THREADS_PER_GPU))
         self.shared_storage_path  = self.extra_config.get("shared_storage_path", "/tmp/shared-kv")
-        self.max_pinned_memory_gb = self.extra_config.get("max_pinned_memory_gb", DEFAULT_MAX_PINNED_MEMORY_GB) # Max pinned CPU buffer in GB
+        self.max_staging_memory_gb = self.extra_config.get("max_staging_memory_gb", DEFAULT_MAX_STAGING_MEMORY_GB) # Max staging CPU buffer in GB
 
         self.gpu_blocks_per_file  = int(self.offloaded_block_size / self.gpu_block_size)
         assert self.offloaded_block_size % self.gpu_block_size == 0, "offloaded_block_size must be a multiple of gpu_block_size"
@@ -85,7 +85,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 gpu_blocks_per_file  = self.gpu_blocks_per_file,
                 dtype                = self.vllm_config.cache_config.cache_dtype,
                 threads_per_gpu      = self.threads_per_gpu,
-                max_pinned_memory_gb = self.max_pinned_memory_gb,
+                max_staging_memory_gb = self.max_staging_memory_gb,
                 root_dir             = self.shared_storage_path,
                 attn_backends        = attn_backends,
             )
@@ -99,7 +99,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 kv_caches            = kv_caches,
                 root_dir             = self.shared_storage_path,
                 threads_per_gpu      = self.threads_per_gpu,
-                max_pinned_memory_gb = self.max_pinned_memory_gb,
+                max_staging_memory_gb = self.max_staging_memory_gb,
                 attn_backends        = attn_backends,
             )
 

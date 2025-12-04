@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 # ----------------------------------------------------------------------
 # Base Storage Offloading Handler
 # ----------------------------------------------------------------------
-DEFAULT_MAX_PINNED_MEMORY_GB = 150
+DEFAULT_MAX_STAGING_MEMORY_GB = 150
 DEFAULT_MAX_THREADS_PER_GPU = 150
 
 class StorageOffloadingHandler(OffloadingHandler):
@@ -43,7 +43,7 @@ class StorageOffloadingHandler(OffloadingHandler):
         gpu_blocks_per_file: int,
         threads_per_gpu: int ,
         attn_backends: dict[str, type[AttentionBackend]] ,
-        max_pinned_memory_gb: int = DEFAULT_MAX_PINNED_MEMORY_GB,  # in GB
+        max_staging_memory_gb: int = DEFAULT_MAX_STAGING_MEMORY_GB,  # in GB
         root_dir: str = "/tmp/shared-kv"
     ):
 
@@ -54,7 +54,7 @@ class StorageOffloadingHandler(OffloadingHandler):
         self.gpu_blocks_per_file = gpu_blocks_per_file
         self.base_path = self.get_kv_cache_base_path(model_name, tp_size, tp_rank, dtype, root_dir)
         self.threads_per_gpu = min(threads_per_gpu , int(os.cpu_count()), DEFAULT_MAX_THREADS_PER_GPU)
-        self.max_pinned_memory_gb = max_pinned_memory_gb
+        self.max_staging_memory_gb = max_staging_memory_gb
         self.h2d_stream = torch.cuda.Stream()
         self.d2h_stream = torch.cuda.Stream()
         self.attn_backends = attn_backends
@@ -81,8 +81,8 @@ class StorageOffloadingHandler(OffloadingHandler):
         os.makedirs(full_path.parent, exist_ok=True)
         return full_path
 
-    def compute_pinned_mb(self,tensors, gpu_blocks_per_file, kv_before_num_blocks, layers_before_num_blocks, num_blocks_idx, safety=1.0, min_mb=32, max_mb=None):
-        """Estimate pinned memory size in MB, applying safety and min/max limits."""
+    def compute_buffer_size_mb(self,tensors, gpu_blocks_per_file, kv_before_num_blocks, layers_before_num_blocks, num_blocks_idx, safety=1.0, min_mb=32, max_mb=None):
+        """Estimate staging memory size in MB, applying safety and min/max limits."""
         ref = tensors[0]
         # Extract exactly one KV block (block 0) along the correct block dimension for any layout
         per_block = ref.index_select(num_blocks_idx, torch.tensor([0], device=ref.device)).squeeze(num_blocks_idx)
@@ -173,30 +173,30 @@ class GPUStorageOffloadingHandler(StorageOffloadingHandler):
         attn_backends: Dict[str, type[AttentionBackend]],
         dtype: torch.dtype,
         threads_per_gpu: Optional[int] = None,
-        max_pinned_memory_gb: float = DEFAULT_MAX_PINNED_MEMORY_GB,
+        max_staging_memory_gb: float = DEFAULT_MAX_STAGING_MEMORY_GB,
         root_dir: str = "/tmp/shared-kv"
     ):
 
         super().__init__(model_name, tp_size, tp_rank, dtype,
-                         gpu_blocks_per_file, threads_per_gpu, attn_backends, max_pinned_memory_gb, root_dir)
+                         gpu_blocks_per_file, threads_per_gpu, attn_backends, max_staging_memory_gb, root_dir)
 
         self.src_tensors = list(kv_caches.values())
         # Determine KV cache layout parameters
         num_blocks_idx, kv_before_num_blocks, layers_before_num_blocks = self.get_kv_cache_parmeters(kv_caches)
-        # Compute pinned memory buffer size
-        self.buffer_size_mb = self.compute_pinned_mb(self.src_tensors, gpu_blocks_per_file,kv_before_num_blocks=kv_before_num_blocks[0],
+        # Compute staging memory buffer size
+        self.buffer_size_mb = self.compute_buffer_size_mb(self.src_tensors, gpu_blocks_per_file,kv_before_num_blocks=kv_before_num_blocks[0],
                                                      layers_before_num_blocks=layers_before_num_blocks[0], num_blocks_idx=num_blocks_idx[0])
-        if self.buffer_size_mb * self.threads_per_gpu > self.max_pinned_memory_gb * 1024:
-            self.threads_per_gpu = min(self.threads_per_gpu, int(self.max_pinned_memory_gb * 1024 / self.buffer_size_mb))
-            print(f"[WARN] Adjusted threads_per_gpu to {self.threads_per_gpu} due to max_pinned_memory_gb {self.max_pinned_memory_gb} limit "+
+        if self.buffer_size_mb * self.threads_per_gpu > self.max_staging_memory_gb * 1024:
+            self.threads_per_gpu = min(self.threads_per_gpu, int(self.max_staging_memory_gb * 1024 / self.buffer_size_mb))
+            print(f"[WARN] Adjusted threads_per_gpu to {self.threads_per_gpu} due to max_staging_memory_gb {self.max_staging_memory_gb} limit "+
                   f" (buffer_size_mb={self.buffer_size_mb}).")
 
 
         # Initialize storage offload resources
         storage_offload.init_resources(
             io_threads            = self.threads_per_gpu,
-            pinned_buffer_size_mb = self.buffer_size_mb,
-            max_pinned_memory_gb  = self.max_pinned_memory_gb,
+            staging_buffer_size_mb = self.buffer_size_mb,
+            max_staging_memory_gb  = self.max_staging_memory_gb,
             tp_rank               = self.tp_rank,
             kv_before_blocks      = kv_before_num_blocks[0],     # assuming all layers have the same layout
             layers_before_blocks  = layers_before_num_blocks[0], # assuming all layers have the same layout
@@ -208,8 +208,8 @@ class GPUStorageOffloadingHandler(StorageOffloadingHandler):
             f"number_of_gpu={self.tp_size},"
             f"tp_rank={self.tp_rank},"
             f"threads_per_gpu={self.threads_per_gpu},"
-            f"pinned_buffer_size_mb={self.buffer_size_mb}, "
-            f"max_pinned_memory_gb={self.max_pinned_memory_gb}, "
+            f"staging_buffer_size_mb={self.buffer_size_mb}, "
+            f"max_staging_memory_gb={self.max_staging_memory_gb}, "
             f"root_dir={self.base_path},"
             f"kv_before_num_blocks={kv_before_num_blocks[0]}, "
             f"layers_before_num_blocks={layers_before_num_blocks[0]}, "
@@ -259,12 +259,12 @@ class StorageGPUOffloadingHandler(StorageOffloadingHandler):
         kv_caches: Dict[str, torch.Tensor],
         attn_backends: Dict[str, type[AttentionBackend]],
         threads_per_gpu: Optional[int] = None,
-        max_pinned_memory_gb: float = DEFAULT_MAX_PINNED_MEMORY_GB,
+        max_staging_memory_gb: float = DEFAULT_MAX_STAGING_MEMORY_GB,
         root_dir: str = "/tmp/shared-kv"
     ):
 
         super().__init__(model_name, tp_size, tp_rank, dtype,
-                         gpu_blocks_per_file, threads_per_gpu, attn_backends, max_pinned_memory_gb, root_dir)
+                         gpu_blocks_per_file, threads_per_gpu, attn_backends, max_staging_memory_gb, root_dir)
         self.dst_tensors = list(kv_caches.values())
 
     # Storage → GPU async transfer
