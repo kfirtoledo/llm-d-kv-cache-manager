@@ -36,10 +36,7 @@
 extern thread_local size_t thread_stream_idx;
 
 // ThreadPool constructor
-ThreadPool::ThreadPool(size_t threads,
-                       size_t staging_buffer_mb,
-                       int tp_rank,
-                       int device_id)
+ThreadPool::ThreadPool(size_t threads, size_t staging_buffer_mb, int tp_rank, int device_id)
     : m_device_id(device_id) {
     // Initialize PyTorch threading globally (main thread only)
     // at::init_num_threads();
@@ -47,8 +44,7 @@ ThreadPool::ThreadPool(size_t threads,
 
     // Get GPU NUMA node ONCE outside the thread loop
     int gpu_numa = get_gpu_numa_node(device_id);
-    std::cout << "[INFO] GPU " << device_id << " mapped to NUMA node "
-              << gpu_numa << "\n";
+    std::cout << "[INFO] GPU " << device_id << " mapped to NUMA node " << gpu_numa << "\n";
 
     // Get all CPUs in that NUMA node
     auto local_cpus = get_cpus_in_numa_node(gpu_numa);
@@ -64,8 +60,7 @@ ThreadPool::ThreadPool(size_t threads,
     }
 
     // Log available CPUs
-    std::cout << "CPUs available for GPU " << device_id << " (NUMA " << gpu_numa
-              << "): ";
+    std::cout << "CPUs available for GPU " << device_id << " (NUMA " << gpu_numa << "): ";
     for (int cpu : local_cpus) std::cout << cpu << " ";
     std::cout << "\n";
 
@@ -73,90 +68,74 @@ ThreadPool::ThreadPool(size_t threads,
     for (size_t i = 0; i < threads; ++i) {
         // Launch a new worker thread with a lambda that initializes thread
         // resources and processes queued tasks.
-        workers.emplace_back([this,
-                              i,
-                              threads,
-                              staging_buffer_mb,
-                              tp_rank,
-                              device_id,
-                              gpu_numa,
-                              local_cpus] {
-            cudaSetDevice(device_id);
+        workers.emplace_back(
+            [this, i, threads, staging_buffer_mb, tp_rank, device_id, gpu_numa, local_cpus] {
+                cudaSetDevice(device_id);
 
-            // Round-robin CPUs within the NUMA node
-            // TODO: Re-evaluate whether strict NUMA-based round-robin CPU
-            // assignment is optimal for performance.
-            int cpu_id = local_cpus[i % local_cpus.size()];
+                // Round-robin CPUs within the NUMA node
+                // TODO: Re-evaluate whether strict NUMA-based round-robin CPU
+                // assignment is optimal for performance.
+                int cpu_id = local_cpus[i % local_cpus.size()];
 
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(cpu_id, &cpuset);
+                cpu_set_t cpuset;
+                CPU_ZERO(&cpuset);
+                CPU_SET(cpu_id, &cpuset);
 
-            if (pthread_setaffinity_np(pthread_self(),
-                                       sizeof(cpuset),
-                                       &cpuset) != 0) {
-                std::cerr << "[ERROR] Failed to set affinity for thread " << i
-                          << " to CPU " << cpu_id << "\n";
-            }
-
-            DEBUG_PRINT("IO thread " << i << " set CUDA device to " << device_id
-                                     << ", tp_rank=" << tp_rank
-                                     << ") pinned to CPU " << cpu_id);
-
-            // Attach preallocated staging buffer for this thread
-            if (i < g_staging_buffers.size() &&
-                g_staging_buffers[i].ptr != nullptr) {
-                t_staging_buffer.ptr = g_staging_buffers[i].ptr;
-                t_staging_buffer.size = g_staging_buffers[i].size;
-                DEBUG_PRINT("IO thread "
-                            << i << " attached to preallocated staging buffer "
-                            << (t_staging_buffer.size / (1024 * 1024))
-                            << " MB");
-            } else {
-                std::cerr << "[WARN] IO thread " << i
-                          << " has no preallocated staging buffer; it will "
-                             "allocate one on first use.\n";
-            }
-
-            // Each thread gets its own CUDA stream index
-            thread_stream_idx = i;
-
-            // Worker loop
-            while (true) {
-                std::function<void()> task;
-                {
-                    // Lock the task queue before checking it
-                    std::unique_lock<std::mutex> lock(queue_mutex);
-
-                    // Wait until either a new task arrives or the pool is
-                    // stopping. (wait() unlocks the mutex while sleeping and
-                    // re-locks it when waking)
-                    condition.wait(lock,
-                                   [this] { return stop || !tasks.empty(); });
-
-                    // Exit thread if pool is stopping and no tasks remain
-                    if (stop && tasks.empty()) return;
-
-                    // Fetch next task from the queue
-                    task = std::move(tasks.front());
-                    tasks.pop();
+                if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) != 0) {
+                    std::cerr << "[ERROR] Failed to set affinity for thread " << i << " to CPU "
+                              << cpu_id << "\n";
                 }
-                try {
-                    // Execute the task
-                    task();
-                } catch (const std::exception& e) {
-                    std::cerr
-                        << "[ERROR] Exception in worker thread: " << e.what()
-                        << "\n";
-                } catch (...) {
-                    std::cerr << "[ERROR] Unknown exception in worker thread\n";
+
+                DEBUG_PRINT("IO thread " << i << " set CUDA device to " << device_id << ", tp_rank="
+                                         << tp_rank << ") pinned to CPU " << cpu_id);
+
+                // Attach preallocated staging buffer for this thread
+                if (i < g_staging_buffers.size() && g_staging_buffers[i].ptr != nullptr) {
+                    t_staging_buffer.ptr = g_staging_buffers[i].ptr;
+                    t_staging_buffer.size = g_staging_buffers[i].size;
+                    DEBUG_PRINT("IO thread " << i << " attached to preallocated staging buffer "
+                                             << (t_staging_buffer.size / (1024 * 1024)) << " MB");
+                } else {
+                    std::cerr << "[WARN] IO thread " << i
+                              << " has no preallocated staging buffer; it will "
+                                 "allocate one on first use.\n";
                 }
-            }
-        });
+
+                // Each thread gets its own CUDA stream index
+                thread_stream_idx = i;
+
+                // Worker loop
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        // Lock the task queue before checking it
+                        std::unique_lock<std::mutex> lock(queue_mutex);
+
+                        // Wait until either a new task arrives or the pool is
+                        // stopping. (wait() unlocks the mutex while sleeping and
+                        // re-locks it when waking)
+                        condition.wait(lock, [this] { return stop || !tasks.empty(); });
+
+                        // Exit thread if pool is stopping and no tasks remain
+                        if (stop && tasks.empty()) return;
+
+                        // Fetch next task from the queue
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+                    try {
+                        // Execute the task
+                        task();
+                    } catch (const std::exception& e) {
+                        std::cerr << "[ERROR] Exception in worker thread: " << e.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "[ERROR] Unknown exception in worker thread\n";
+                    }
+                }
+            });
     }
 
-    std::cout << "[INFO] All " << threads
-              << " I/O threads initialized with staging buffers\n";
+    std::cout << "[INFO] All " << threads << " I/O threads initialized with staging buffers\n";
 }
 
 // ThreadPool destructor

@@ -44,28 +44,24 @@ StagingBufferInfo get_thread_local_staging_buffer(size_t required_bytes) {
             t_staging_buffer.ptr = nullptr;
             t_staging_buffer.size = 0;
             std::cerr << "[WARN] Thread " << std::this_thread::get_id()
-                      << " existing staging buffer too small ("
-                      << t_staging_buffer.size << " bytes), reallocating "
-                      << required_bytes << " bytes\n";
+                      << " existing staging buffer too small (" << t_staging_buffer.size
+                      << " bytes), reallocating " << required_bytes << " bytes\n";
         }
 
         size_t alloc_size = std::max(required_bytes, (size_t)16 * 1024 * 1024);
-        cudaError_t err =
-            cudaHostAlloc(&t_staging_buffer.ptr,
-                          alloc_size,
-                          cudaHostAllocMapped | cudaHostAllocPortable);
+        cudaError_t err = cudaHostAlloc(&t_staging_buffer.ptr,
+                                        alloc_size,
+                                        cudaHostAllocMapped | cudaHostAllocPortable);
 
         if (err != cudaSuccess) {
-            std::cerr << "[ERROR] cudaHostAlloc failed: "
-                      << cudaGetErrorString(err) << "\n";
+            std::cerr << "[ERROR] cudaHostAlloc failed: " << cudaGetErrorString(err) << "\n";
             t_staging_buffer.ptr = nullptr;
             t_staging_buffer.size = 0;
         } else {
             t_staging_buffer.size = alloc_size;
             DEBUG_PRINT("[INFO] Thread " << std::this_thread::get_id()
                                          << " allocated staging buffer "
-                                         << (alloc_size / (1024 * 1024))
-                                         << " MB");
+                                         << (alloc_size / (1024 * 1024)) << " MB");
         }
     }
     return t_staging_buffer;
@@ -81,8 +77,7 @@ void preallocate_staging_buffers(size_t io_threads, size_t buffer_size_mb) {
 
     for (size_t i = 0; i < io_threads; ++i) {
         workers.emplace_back([i, alloc_bytes]() {
-            StagingBufferInfo buf =
-                get_thread_local_staging_buffer(alloc_bytes);
+            StagingBufferInfo buf = get_thread_local_staging_buffer(alloc_bytes);
             if (!buf.ptr) {
                 std::cerr << "[ERROR] Failed to preallocate staging buffer for "
                              "thread "
@@ -97,17 +92,15 @@ void preallocate_staging_buffers(size_t io_threads, size_t buffer_size_mb) {
     // Wait for all threads to complete initialization
     for (auto& t : workers) t.join();
 
-    std::cout << "[INFO] Pre-allocated staging buffer "
-              << (alloc_bytes / (1024 * 1024)) << " MB for " << io_threads
-              << " threads" << std::endl;
+    std::cout << "[INFO] Pre-allocated staging buffer " << (alloc_bytes / (1024 * 1024))
+              << " MB for " << io_threads << " threads" << std::endl;
 }
 
 // Return NUMA node associated with a given GPU
 int get_gpu_numa_node(int device_id) {
     int numa_node = -1;
 
-    cudaError_t err =
-        cudaDeviceGetAttribute(&numa_node, cudaDevAttrHostNumaId, device_id);
+    cudaError_t err = cudaDeviceGetAttribute(&numa_node, cudaDevAttrHostNumaId, device_id);
     TORCH_CHECK(err == cudaSuccess,
                 "Failed to query NUMA node for GPU ",
                 device_id,
@@ -122,8 +115,7 @@ std::vector<int> get_cpus_in_numa_node(int node) {
     // Read the cpulist file for this NUMA node (e.g. "0-13,84-97")
     std::vector<int> cpus;
     if (node < 0) return cpus;
-    std::string path =
-        "/sys/devices/system/node/node" + std::to_string(node) + "/cpulist";
+    std::string path = "/sys/devices/system/node/node" + std::to_string(node) + "/cpulist";
     std::ifstream f(path);
     if (!f.is_open()) return cpus;
     std::string list;

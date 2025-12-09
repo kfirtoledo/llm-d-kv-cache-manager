@@ -35,15 +35,13 @@ const size_t WRITE_BUFFER_SIZE = 1 * 1024 * 1024;  // 1MB buffer
 // Allocate custom I/O buffer for this thread (replaces small default buffer)
 thread_local std::vector<char> thread_write_buffer(WRITE_BUFFER_SIZE);
 // Thread-local unique id for temporary files
-thread_local uint64_t thread_unique_id =
-    std::hash<std::thread::id>{}(std::this_thread::get_id());
+thread_local uint64_t thread_unique_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
 
 // -------------------------------------------------------------------
 // file-IO Functions
 // -------------------------------------------------------------------
 // Write a tensor to disk using a temporary file and atomic rename
-bool write_tensor_to_file(const torch::Tensor& host_buf,
-                          const std::string& target_path) {
+bool write_tensor_to_file(const torch::Tensor& host_buf, const std::string& target_path) {
     // Pointer and size of data to write
     const void* data_ptr = host_buf.data_ptr();
     size_t nbytes = host_buf.nbytes();
@@ -54,20 +52,18 @@ bool write_tensor_to_file(const torch::Tensor& host_buf,
     try {
         fs::create_directories(parent_dir);
     } catch (const fs::filesystem_error& e) {
-        std::cerr << "[ERROR] Failed to create directories: " << e.what()
-                  << "\n";
+        std::cerr << "[ERROR] Failed to create directories: " << e.what() << "\n";
         return false;
     }
 
     // Write to a temporary file to ensure atomic replace on rename
     // Include thread_unique_id so each thread uses a unique temporary file
-    std::string tmp_path =
-        target_path + std::to_string(thread_unique_id) + ".tmp.";
+    std::string tmp_path = target_path + std::to_string(thread_unique_id) + ".tmp.";
 
     std::ofstream ofs(tmp_path, std::ios::out | std::ios::binary);
     if (!ofs) {
-        std::cerr << "[ERROR] Failed to open temporary file for writing: "
-                  << tmp_path << " - " << std::strerror(errno) << "\n";
+        std::cerr << "[ERROR] Failed to open temporary file for writing: " << tmp_path << " - "
+                  << std::strerror(errno) << "\n";
         return false;
     }
 
@@ -78,8 +74,8 @@ bool write_tensor_to_file(const torch::Tensor& host_buf,
     // Write file contents
     ofs.write(reinterpret_cast<const char*>(data_ptr), nbytes);
     if (!ofs) {
-        std::cerr << "[ERROR] Failed to write to temporary file: " << tmp_path
-                  << " - " << std::strerror(errno) << "\n";
+        std::cerr << "[ERROR] Failed to write to temporary file: " << tmp_path << " - "
+                  << std::strerror(errno) << "\n";
         ofs.close();
         std::remove(tmp_path.c_str());  // Clean up temp file
         return false;
@@ -89,8 +85,8 @@ bool write_tensor_to_file(const torch::Tensor& host_buf,
     // Atomically rename temp file to final target name after a successful write
     if (std::rename(tmp_path.c_str(), target_path.c_str()) != 0) {
         std::cerr << "[ERROR] "
-                  << "Failed to rename " + tmp_path + " to " + target_path +
-                         " - " + std::strerror(errno)
+                  << "Failed to rename " + tmp_path + " to " + target_path + " - " +
+                         std::strerror(errno)
                   << "\n";
         std::remove(tmp_path.c_str());
         return false;
@@ -115,10 +111,9 @@ bool read_tensor_from_file(const std::string& path, torch::Tensor& host_buf) {
     // Acquire staging buffer of the required size
     StagingBufferInfo buf = get_thread_local_staging_buffer(file_size);
     if (!buf.ptr || buf.size < file_size) {
-        std::cerr << "[ERROR] Staging buffer too small for file: " << path
-                  << "\n"
-                  << "[INFO] Required size: " << file_size
-                  << " bytes, Available size: " << buf.size << " bytes\n"
+        std::cerr << "[ERROR] Staging buffer too small for file: " << path << "\n"
+                  << "[INFO] Required size: " << file_size << " bytes, Available size: " << buf.size
+                  << " bytes\n"
                   << "ptr: " << buf.ptr << "\n";
         return false;
     }

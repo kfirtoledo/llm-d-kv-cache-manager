@@ -31,16 +31,14 @@ struct CacheLayout {
                                    int block_axis,
                                    bool kv_before_blocks,
                                    bool layers_before_blocks) {
-        TORCH_CHECK(block_axis >= 0 && block_axis < ref.dim(),
-                    "block_axis out of bounds!");
+        TORCH_CHECK(block_axis >= 0 && block_axis < ref.dim(), "block_axis out of bounds!");
         int64_t num_blocks = ref.size(block_axis);
         size_t elem_size = ref.element_size();
         size_t bytes_per_plane = ref.stride(block_axis) * elem_size;
 
         CacheLayout layout;
         layout.num_blocks = num_blocks;
-        layout.bytes_per_block =
-            kv_before_blocks ? bytes_per_plane * 2 : bytes_per_plane;
+        layout.bytes_per_block = kv_before_blocks ? bytes_per_plane * 2 : bytes_per_plane;
         layout.elem_size = elem_size;
         layout.block_axis = block_axis;
         layout.kv_before_blocks = kv_before_blocks;
@@ -88,8 +86,7 @@ inline int64_t compute_cpu_offset(size_t bi,
 }
 
 // Thread configuration constant
-constexpr int COPY_THREADS =
-    512;  // TODO: check optimal thread count (256 or 512)
+constexpr int COPY_THREADS = 512;  // TODO: check optimal thread count (256 or 512)
 
 //----------------------------------------------------------------------
 // CUDA Kernel
@@ -97,24 +94,22 @@ constexpr int COPY_THREADS =
 // Kernel copies one K or V plane of one block.
 // Each thread cooperates to copy bytes from src → dst.
 __global__ void copy_blocks_kernel(
-    const uint8_t* __restrict__ src_base,  // Source (CPU for GET, GPU for PUT)
-    uint8_t* __restrict__ dst_base,  // Destination (GPU for GET, CPU for PUT)
+    const uint8_t* __restrict__ src_base,           // Source (CPU for GET, GPU for PUT)
+    uint8_t* __restrict__ dst_base,                 // Destination (GPU for GET, CPU for PUT)
     const int64_t* __restrict__ block_ids,          // Global block IDs to copy
     const int64_t* __restrict__ src_block_offsets,  // Per-block source offsets
                                                     // (within file or buffer)
     const int num_blocks,                           // Number of blocks to copy
     const int layer,                                // Layer index
-    const int64_t
-        num_blocks_tot,  // Total blocks per tensor (used for offset math)
-    const size_t bytes_per_plane,  // Bytes per K or V plane
-    const size_t bytes_per_block,  // Total bytes per block (K+V)
-    const bool kv_before_blocks,  // use plane-based layout or full-block layout
+    const int64_t num_blocks_tot,     // Total blocks per tensor (used for offset math)
+    const size_t bytes_per_plane,     // Bytes per K or V plane
+    const size_t bytes_per_block,     // Total bytes per block (K+V)
+    const bool kv_before_blocks,      // use plane-based layout or full-block layout
     const bool layers_before_blocks,  // layers appear before block dimension
     const bool is_put)                // Add direction flag
 {
-    const int bi = blockIdx.x;  // block index
-    const int k_or_v =
-        blockIdx.y;  // 0=K, 1=V (only used if kv_before_blocks==true)
+    const int bi = blockIdx.x;      // block index
+    const int k_or_v = blockIdx.y;  // 0=K, 1=V (only used if kv_before_blocks==true)
     const int tid = threadIdx.x;
 
     if (bi >= num_blocks) return;
@@ -123,8 +118,7 @@ __global__ void copy_blocks_kernel(
     const int64_t gpu_block_idx = block_ids[bi];
     // CPU offset for this block
     const size_t src_block_base = src_block_offsets[bi];
-    size_t src_plane_offset, dst_plane_offset, src_block_offset,
-        dst_block_offset;
+    size_t src_plane_offset, dst_plane_offset, src_block_offset, dst_block_offset;
 
     // ----------------------------------------------------------------------
     // Case 1: K/V planes appear before the block dimension
@@ -136,19 +130,15 @@ __global__ void copy_blocks_kernel(
         if (is_put) {
             // PUT: GPU → CPU
             src_plane_offset =
-                static_cast<size_t>(gpu_block_idx + k_or_v * num_blocks_tot) *
-                bytes_per_plane;
-            dst_plane_offset = src_block_base +
-                               static_cast<size_t>(layer) * bytes_per_block +
-                               plane_offset;
+                static_cast<size_t>(gpu_block_idx + k_or_v * num_blocks_tot) * bytes_per_plane;
+            dst_plane_offset =
+                src_block_base + static_cast<size_t>(layer) * bytes_per_block + plane_offset;
         } else {
             // GET: CPU → GPU
-            src_plane_offset = src_block_base +
-                               static_cast<size_t>(layer) * bytes_per_block +
-                               plane_offset;
+            src_plane_offset =
+                src_block_base + static_cast<size_t>(layer) * bytes_per_block + plane_offset;
             dst_plane_offset =
-                static_cast<size_t>(gpu_block_idx + k_or_v * num_blocks_tot) *
-                bytes_per_plane;
+                static_cast<size_t>(gpu_block_idx + k_or_v * num_blocks_tot) * bytes_per_plane;
         }
 
         const uint8_t* src = src_base + src_plane_offset;
@@ -168,16 +158,12 @@ __global__ void copy_blocks_kernel(
     if (layers_before_blocks) {
         if (is_put) {
             // PUT: GPU → CPU
-            src_block_offset =
-                static_cast<size_t>(gpu_block_idx) * bytes_per_block;
-            dst_block_offset =
-                src_block_base + static_cast<size_t>(layer) * bytes_per_block;
+            src_block_offset = static_cast<size_t>(gpu_block_idx) * bytes_per_block;
+            dst_block_offset = src_block_base + static_cast<size_t>(layer) * bytes_per_block;
         } else {
             // GET: CPU → GPU
-            src_block_offset =
-                src_block_base + static_cast<size_t>(layer) * bytes_per_block;
-            dst_block_offset =
-                static_cast<size_t>(gpu_block_idx) * bytes_per_block;
+            src_block_offset = src_block_base + static_cast<size_t>(layer) * bytes_per_block;
+            dst_block_offset = static_cast<size_t>(gpu_block_idx) * bytes_per_block;
         }
 
         const uint8_t* src = src_base + src_block_offset;
@@ -224,8 +210,7 @@ void copy_via_cuda_memcpy(uint8_t* cpu_base,
                           const c10::cuda::CUDAStream& stream,
                           int num_blocks_in_file,
                           bool is_put) {
-    cudaMemcpyKind kind =
-        is_put ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+    cudaMemcpyKind kind = is_put ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
     // Direct pointer arithmetic - no indexing operations
     for (size_t bi = 0; bi < block_ids_list.size(); ++bi) {
         int64_t gpu_block_idx = block_ids_list[bi];
@@ -237,63 +222,41 @@ void copy_via_cuda_memcpy(uint8_t* cpu_base,
                                                    num_blocks_in_file);
         if (layout.layers_before_blocks) {  // Standard layout
             for (size_t layer = 0; layer < gpu_tensors.size(); ++layer) {
-                uint8_t* gpu_base =
-                    reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
+                uint8_t* gpu_base = reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
                 size_t block_offset = gpu_block_idx * layout.bytes_per_block;
 
                 if (layout.kv_before_blocks) {
                     size_t plane = layout.kv_bytes_per_plane;
                     // Compute GPU and CPU offsets for K
-                    void* src_K = is_put ? (gpu_base + block_offset)
-                                         : (cpu_base + cpu_block_base);
-                    void* dst_K = is_put ? (cpu_base + cpu_block_base)
-                                         : (gpu_base + block_offset);
-                    cudaError_t err1 = cudaMemcpyAsync(dst_K,
-                                                       src_K,
-                                                       plane,
-                                                       kind,
-                                                       stream.stream());
-                    TORCH_CHECK(err1 == cudaSuccess,
-                                "cudaMemcpyAsync failed (K)");
+                    void* src_K = is_put ? (gpu_base + block_offset) : (cpu_base + cpu_block_base);
+                    void* dst_K = is_put ? (cpu_base + cpu_block_base) : (gpu_base + block_offset);
+                    cudaError_t err1 = cudaMemcpyAsync(dst_K, src_K, plane, kind, stream.stream());
+                    TORCH_CHECK(err1 == cudaSuccess, "cudaMemcpyAsync failed (K)");
 
                     // Compute GPU and CPU offsets for V
                     void* src_V = is_put ? (gpu_base + block_offset + plane)
                                          : (cpu_base + cpu_block_base + plane);
                     void* dst_V = is_put ? (cpu_base + cpu_block_base + plane)
                                          : (gpu_base + block_offset + plane);
-                    cudaError_t err2 = cudaMemcpyAsync(dst_V,
-                                                       src_V,
-                                                       plane,
-                                                       kind,
-                                                       stream.stream());
-                    TORCH_CHECK(err2 == cudaSuccess,
-                                "cudaMemcpyAsync failed (V)");
+                    cudaError_t err2 = cudaMemcpyAsync(dst_V, src_V, plane, kind, stream.stream());
+                    TORCH_CHECK(err2 == cudaSuccess, "cudaMemcpyAsync failed (V)");
                 } else {  // One copy for both K and V
-                    void* src = is_put ? (gpu_base + block_offset)
-                                       : (cpu_base + cpu_block_base);
-                    void* dst = is_put ? (cpu_base + cpu_block_base)
-                                       : (gpu_base + block_offset);
-                    cudaError_t err = cudaMemcpyAsync(dst,
-                                                      src,
-                                                      layout.bytes_per_block,
-                                                      kind,
-                                                      stream.stream());
+                    void* src = is_put ? (gpu_base + block_offset) : (cpu_base + cpu_block_base);
+                    void* dst = is_put ? (cpu_base + cpu_block_base) : (gpu_base + block_offset);
+                    cudaError_t err =
+                        cudaMemcpyAsync(dst, src, layout.bytes_per_block, kind, stream.stream());
                     TORCH_CHECK(err == cudaSuccess, "cudaMemcpyAsync failed");
                 }
             }
         } else {  // Cross-layer layout- one copy for all layers
-            uint8_t* gpu_base =
-                reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
+            uint8_t* gpu_base = reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
             size_t gpu_offset = gpu_block_idx * layout.bytes_per_block;
             uint8_t* cpu_ptr = cpu_base + cpu_block_base;
 
             const void* src = is_put ? (gpu_base + gpu_offset) : cpu_ptr;
             void* dst = is_put ? cpu_ptr : (gpu_base + gpu_offset);
-            cudaError_t err = cudaMemcpyAsync(dst,
-                                              src,
-                                              layout.bytes_per_block,
-                                              kind,
-                                              stream.stream());
+            cudaError_t err =
+                cudaMemcpyAsync(dst, src, layout.bytes_per_block, kind, stream.stream());
             TORCH_CHECK(err == cudaSuccess, "cudaMemcpyAsync failed");
         }
     }
@@ -331,8 +294,7 @@ void copy_via_kernel(uint8_t* cpu_base,
     // host memory - zero-copy)
     uint8_t* cpu_base_dev = cpu_base;
     if (is_put) {
-        cudaError_t map_err =
-            cudaHostGetDevicePointer(&cpu_base_dev, cpu_base, 0);
+        cudaError_t map_err = cudaHostGetDevicePointer(&cpu_base_dev, cpu_base, 0);
         TORCH_CHECK(map_err == cudaSuccess,
                     "cudaHostGetDevicePointer failed: ",
                     cudaGetErrorString(map_err));
@@ -344,8 +306,7 @@ void copy_via_kernel(uint8_t* cpu_base,
 
         // Launch copy kernel for all the blocks on each layer
         for (int layer = 0; layer < num_layers; ++layer) {
-            uint8_t* gpu_ptr =
-                reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
+            uint8_t* gpu_ptr = reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
 
             copy_blocks_kernel<<<grid, block, 0, stream.stream()>>>(
                 is_put ? gpu_ptr : cpu_base,      // Source
@@ -376,8 +337,7 @@ void copy_via_kernel(uint8_t* cpu_base,
         dim3 grid(block_ids_list.size(), 1);
         dim3 block(COPY_THREADS);
 
-        uint8_t* gpu_ptr =
-            reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
+        uint8_t* gpu_ptr = reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
         // Launch the copy kernel once for all blocks across all layers
         copy_blocks_kernel<<<grid, block, 0, stream.stream()>>>(
             is_put ? gpu_ptr : cpu_base,      // Source
@@ -401,15 +361,14 @@ void copy_via_kernel(uint8_t* cpu_base,
 }
 
 // Main transfer function - dispatches to kernel or memcpy path
-void transfer_kv_blocks(
-    uint8_t* cpu_base,
-    const std::vector<torch::Tensor>& gpu_tensors,
-    const std::vector<int64_t>& block_ids_list,
-    const CacheLayout& layout,
-    const c10::cuda::CUDAStream& stream,
-    bool is_put,
-    bool use_kernel,
-    int num_blocks_in_file = 0  // default is 0, ignored for PUT
+void transfer_kv_blocks(uint8_t* cpu_base,
+                        const std::vector<torch::Tensor>& gpu_tensors,
+                        const std::vector<int64_t>& block_ids_list,
+                        const CacheLayout& layout,
+                        const c10::cuda::CUDAStream& stream,
+                        bool is_put,
+                        bool use_kernel,
+                        int num_blocks_in_file = 0  // default is 0, ignored for PUT
 ) {
     if (use_kernel) {
         copy_via_kernel(cpu_base,
@@ -436,25 +395,22 @@ void transfer_kv_blocks(
 
 // Copy selected GPU K/V blocks into a single staging CPU buffer.
 // The staging buffer is returned as a CPU tensor (no copy, just a view).
-torch::Tensor copy_gpu_tensors_to_buffer(
-    const std::vector<torch::Tensor>& src_tensors,
-    const std::vector<int64_t>& block_ids_list,
-    const c10::cuda::CUDAStream& stream) {
+torch::Tensor copy_gpu_tensors_to_buffer(const std::vector<torch::Tensor>& src_tensors,
+                                         const std::vector<int64_t>& block_ids_list,
+                                         const c10::cuda::CUDAStream& stream) {
     TORCH_CHECK(!src_tensors.empty(), "Source tensors list is empty");
     const auto& ref = src_tensors[0];
     TORCH_CHECK(ref.is_contiguous(), "src_tensors must be contiguous");
 
     // Extract tensor geometry
-    auto layout =
-        CacheLayout::from_tensor(ref,
-                                 g_connector_config.block_axis,
-                                 g_connector_config.kv_before_blocks,
-                                 g_connector_config.layers_before_blocks);
+    auto layout = CacheLayout::from_tensor(ref,
+                                           g_connector_config.block_axis,
+                                           g_connector_config.kv_before_blocks,
+                                           g_connector_config.layers_before_blocks);
     const int num_layers = static_cast<int>(src_tensors.size());
 
     // Total required staging memory
-    const size_t total_bytes =
-        block_ids_list.size() * num_layers * layout.bytes_per_block;
+    const size_t total_bytes = block_ids_list.size() * num_layers * layout.bytes_per_block;
 
     // Fetch or allocate thread-local staging buffer
     StagingBufferInfo buf = get_thread_local_staging_buffer(total_bytes);
@@ -465,16 +421,13 @@ torch::Tensor copy_gpu_tensors_to_buffer(
                 buf.size);
 
     auto dtype = ref.dtype();
-    const int64_t total_elements =
-        static_cast<int64_t>(total_bytes / layout.elem_size);
+    const int64_t total_elements = static_cast<int64_t>(total_bytes / layout.elem_size);
 
     // Wrap staging buffer as tensor view (no copy)
-    torch::Tensor result_cpu = torch::from_blob(buf.ptr,
-                                                {total_elements},
-                                                torch::TensorOptions()
-                                                    .dtype(dtype)
-                                                    .device(torch::kCPU)
-                                                    .pinned_memory(true));
+    torch::Tensor result_cpu = torch::from_blob(
+        buf.ptr,
+        {total_elements},
+        torch::TensorOptions().dtype(dtype).device(torch::kCPU).pinned_memory(true));
 
     auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
 
@@ -483,13 +436,7 @@ torch::Tensor copy_gpu_tensors_to_buffer(
     bool is_put = true;
 
     // Execute the copy operation
-    transfer_kv_blocks(cpu_base,
-                       src_tensors,
-                       block_ids_list,
-                       layout,
-                       stream,
-                       is_put,
-                       use_kernel);
+    transfer_kv_blocks(cpu_base, src_tensors, block_ids_list, layout, stream, is_put, use_kernel);
 
     // Reinterpret bfloat16 tensor as uint16_t for safe raw byte access (I/O or
     // memcpy)
@@ -515,15 +462,13 @@ bool copy_buffer_to_gpu_tensors(torch::Tensor cpu_buf,
     TORCH_CHECK(cpu_buf.is_contiguous(), "cpu buffer must be contiguous");
 
     // Verify cpu_buf is pinned memory
-    TORCH_CHECK(cpu_buf.is_pinned(),
-                "cpu_buf must be pinned memory for kernel-based copy");
+    TORCH_CHECK(cpu_buf.is_pinned(), "cpu_buf must be pinned memory for kernel-based copy");
 
     // Extract tensor geometry
-    auto layout =
-        CacheLayout::from_tensor(ref,
-                                 g_connector_config.block_axis,
-                                 g_connector_config.kv_before_blocks,
-                                 g_connector_config.layers_before_blocks);
+    auto layout = CacheLayout::from_tensor(ref,
+                                           g_connector_config.block_axis,
+                                           g_connector_config.kv_before_blocks,
+                                           g_connector_config.layers_before_blocks);
     const int num_layers = static_cast<int>(dst_tensors.size());
 
     auto* cpu_base = cpu_buf.data_ptr<uint8_t>();
