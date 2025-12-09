@@ -93,10 +93,13 @@ void init_resources(int io_threads,
         int device_id;
         cudaGetDevice(&device_id);
 
-        std::cout << "[INFO] Initializing ThreadPool with " << io_threads << " threads on device " << device_id << ", "
-                  << staging_buffer_size_mb << " MB staging buffer per thread, " << max_staging_memory_gb << " GB max staging memory\n";
+        std::cout << "[INFO] Initializing ThreadPool with " << io_threads
+                  << " threads on device " << device_id << ", "
+                  << staging_buffer_size_mb << " MB staging buffer per thread, "
+                  << max_staging_memory_gb << " GB max staging memory\n";
 
-        // Enable GPU access to mapped host memory (needed only for cudaHostAllocMapped before any CUDA context)
+        // Enable GPU access to mapped host memory (needed only for
+        // cudaHostAllocMapped before any CUDA context)
         cudaSetDeviceFlags(cudaDeviceMapHost);
         int gpu_numa = get_gpu_numa_node(device_id);
         numa_set_preferred(gpu_numa);
@@ -104,13 +107,18 @@ void init_resources(int io_threads,
         preallocate_staging_buffers(io_threads, staging_buffer_size_mb);
 
         // Pass device_id to thread pool
-        g_io_pool = std::make_unique<ThreadPool>(io_threads, staging_buffer_size_mb, tp_rank, device_id);
+        g_io_pool = std::make_unique<ThreadPool>(io_threads,
+                                                 staging_buffer_size_mb,
+                                                 tp_rank,
+                                                 device_id);
 
         // Create dedicated streams for each thread on the current device
         g_streams_pool.clear();
         g_streams_pool.reserve(io_threads);
         for (size_t i = 0; i < io_threads; i++) {
-            g_streams_pool.push_back(at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_id));
+            g_streams_pool.push_back(
+                at::cuda::getStreamFromPool(/*isHighPriority=*/false,
+                                            device_id));
         }
 
         // Warm up CUDA context and streams
@@ -136,7 +144,8 @@ std::vector<std::pair<int, bool>> get_finished() {
         auto& job_state = kv.second;
 
         // Check if the job has completed all its tasks.
-        if (job_state->completed_tasks.load() == job_state->total_tasks.load()) {
+        if (job_state->completed_tasks.load() ==
+            job_state->total_tasks.load()) {
             bool all_ok = job_state->all_success.load();
             results.emplace_back(job_id, all_ok);
             to_erase.push_back(job_id);
@@ -170,79 +179,96 @@ bool transfer_async_put(int job_id,
                         std::vector<std::string> target_files,
                         std::vector<torch::Tensor> src_tensors,
                         std::vector<std::vector<int64_t>> all_block_ids) {
-    // Create job state object that will track progress and futures for this job.
+    // Create job state object that will track progress and futures for this
+    // job.
     auto job_state = std::make_unique<JobState>();
     job_state->total_tasks = target_files.size();
 
     // Store shared_ptr to tensors to avoid repeated refcount changes
-    auto shared_src_tensors = std::make_shared<std::vector<torch::Tensor>>(std::move(src_tensors));
+    auto shared_src_tensors =
+        std::make_shared<std::vector<torch::Tensor>>(std::move(src_tensors));
 
     // For each target file, enqueue one async task in the I/O thread pool.
     for (size_t i = 0; i < target_files.size(); i++) {
         std::string target = target_files[i];
         auto bids = all_block_ids[i];
 
-        auto future = g_io_pool->enqueue([target, bids, shared_src_tensors, job_state = job_state.get()]() -> bool {
-            // Check if target file already exists - skip write if it does
-            if (std::ifstream(target).good()) {
-                update_atime(target);
-                job_state->completed_tasks.fetch_add(1);
-                return true;  // File exists
-            }
-            // Ensure correct device is set (thread-local)
-            int device_id;
-            cudaGetDevice(&device_id);
+        auto future =
+            g_io_pool->enqueue([target,
+                                bids,
+                                shared_src_tensors,
+                                job_state = job_state.get()]() -> bool {
+                // Check if target file already exists - skip write if it does
+                if (std::ifstream(target).good()) {
+                    update_atime(target);
+                    job_state->completed_tasks.fetch_add(1);
+                    return true;  // File exists
+                }
+                // Ensure correct device is set (thread-local)
+                int device_id;
+                cudaGetDevice(&device_id);
 
-            // Each thread gets a dedicated CUDA stream for async GPU ops.
-            if (!thread_stream.has_value()) {
-                // thread_stream = g_streams_pool[thread_stream_idx % g_streams_pool.size()];
-                thread_stream = at::cuda::getStreamFromPool(/* isHighPriority = */ false);  // use best-effort stream for writes
-            }
-
-            // Save current CUDA stream so we can restore it later.
-            auto current_stream = at::cuda::getCurrentCUDAStream();
-            at::cuda::setCurrentCUDAStream(*thread_stream);
-
-            try {
-                // Use reference to avoid copy - dereference shared_ptr
-                const auto& src = *shared_src_tensors;
-
-                // Stage 1: copy tensors from GPU to staging CPU buffer.
-                auto host_buf = TIME_EXPR("write phase 1: copy_gpu_tensors_to_buffer",
-                                          copy_gpu_tensors_to_buffer(src, bids, *thread_stream),
-                                          "file: " + target);
-
-                cudaError_t err = cudaStreamSynchronize(thread_stream->stream());
-                if (err != cudaSuccess) {
-                    std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
+                // Each thread gets a dedicated CUDA stream for async GPU ops.
+                if (!thread_stream.has_value()) {
+                    // thread_stream = g_streams_pool[thread_stream_idx %
+                    // g_streams_pool.size()];
+                    thread_stream = at::cuda::getStreamFromPool(
+                        /* isHighPriority = */ false);  // use best-effort
+                                                        // stream for writes
                 }
 
-                // Stage 2: Write the staging buffer to disk.
-                bool ok = TIME_EXPR("write phase 2: write_tensor_to_file",
-                                    write_tensor_to_file(host_buf, target),
-                                    ("file:" + target + " size:" + std::to_string(host_buf.nbytes())));
+                // Save current CUDA stream so we can restore it later.
+                auto current_stream = at::cuda::getCurrentCUDAStream();
+                at::cuda::setCurrentCUDAStream(*thread_stream);
 
-                if (!ok) std::cerr << "[ERROR] PUT failed during file write: " << target << "\n";
+                try {
+                    // Use reference to avoid copy - dereference shared_ptr
+                    const auto& src = *shared_src_tensors;
 
-                // Restore original CUDA stream for safety.
-                at::cuda::setCurrentCUDAStream(current_stream);
+                    // Stage 1: copy tensors from GPU to staging CPU buffer.
+                    auto host_buf = TIME_EXPR(
+                        "write phase 1: copy_gpu_tensors_to_buffer",
+                        copy_gpu_tensors_to_buffer(src, bids, *thread_stream),
+                        "file: " + target);
 
-                // Mark task completion.
-                job_state->completed_tasks.fetch_add(1);
+                    cudaError_t err =
+                        cudaStreamSynchronize(thread_stream->stream());
+                    if (err != cudaSuccess) {
+                        std::cerr << "[ERROR] cudaStreamSynchronize failed: "
+                                  << cudaGetErrorString(err) << std::endl;
+                    }
 
-                // if (!ok) job_state->all_success = false; // TODO- silent ignore write failures for now offloading connector not able to
-                // handle failures
-                return ok;
+                    // Stage 2: Write the staging buffer to disk.
+                    bool ok = TIME_EXPR("write phase 2: write_tensor_to_file",
+                                        write_tensor_to_file(host_buf, target),
+                                        ("file:" + target + " size:" +
+                                         std::to_string(host_buf.nbytes())));
 
-            } catch (...) {
-                at::cuda::setCurrentCUDAStream(current_stream);
-                job_state->completed_tasks.fetch_add(1);
-                job_state->all_success = false;
-                std::cerr << "[ERROR] PUT failed for " << target << "\n";
-                return false;
-            }
-        });
-        // Convert std::future → std::shared_future- is copyable and can be waited on by multiple threads.
+                    if (!ok)
+                        std::cerr << "[ERROR] PUT failed during file write: "
+                                  << target << "\n";
+
+                    // Restore original CUDA stream for safety.
+                    at::cuda::setCurrentCUDAStream(current_stream);
+
+                    // Mark task completion.
+                    job_state->completed_tasks.fetch_add(1);
+
+                    // if (!ok) job_state->all_success = false; // TODO- silent
+                    // ignore write failures for now offloading connector not
+                    // able to handle failures
+                    return ok;
+
+                } catch (...) {
+                    at::cuda::setCurrentCUDAStream(current_stream);
+                    job_state->completed_tasks.fetch_add(1);
+                    job_state->all_success = false;
+                    std::cerr << "[ERROR] PUT failed for " << target << "\n";
+                    return false;
+                }
+            });
+        // Convert std::future → std::shared_future- is copyable and can be
+        // waited on by multiple threads.
         job_state->futures.push_back(future.share());
     }
 
@@ -266,11 +292,15 @@ bool transfer_async_get(int job_id,
     for (size_t i = 0; i < source_files.size(); i++) {
         std::string src_file = source_files[i];
         auto block_ids = all_block_ids[i];
-        auto future = g_io_pool->enqueue([=, job_state = job_state.get()]() -> bool {
+        auto future = g_io_pool->enqueue([=,
+                                          job_state =
+                                              job_state.get()]() -> bool {
             // Get dedicated stream for this thread
             if (!thread_stream.has_value()) {
-                thread_stream = g_streams_pool[thread_stream_idx % g_streams_pool.size()];
-                // thread_stream = at::cuda::getStreamFromPool(/* isHighPriority = */ true); // use high-priority stream for reads
+                thread_stream =
+                    g_streams_pool[thread_stream_idx % g_streams_pool.size()];
+                // thread_stream = at::cuda::getStreamFromPool(/* isHighPriority
+                // = */ true); // use high-priority stream for reads
             }
 
             // Save current CUDA stream so we can restore it later.
@@ -281,25 +311,37 @@ bool transfer_async_get(int job_id,
             bool success = false;
             torch::Tensor host_buf;
             // Read data from disk into a tensor.
-            success = TIME_EXPR("read phase 1: read_tensor_from_file", read_tensor_from_file(src_file, host_buf), ("file:" + src_file));
+            success = TIME_EXPR("read phase 1: read_tensor_from_file",
+                                read_tensor_from_file(src_file, host_buf),
+                                ("file:" + src_file));
             if (!success) {
-                std::cerr << "[ERROR] Stage1 read_tensor_from_file failed for " << src_file << std::endl;
+                std::cerr << "[ERROR] Stage1 read_tensor_from_file failed for "
+                          << src_file << std::endl;
             } else {
                 try {  // Stage 2:  copy tensors from staging CPU buffer to GPU.
                        // Perform asynchronous GPU copy and tensor swap.
-                    success = TIME_EXPR("read phase 2: copy_buffer_to_gpu_tensors",
-                                        copy_buffer_to_gpu_tensors(host_buf, block_ids, dst_tensors, gpu_blocks_per_file, *thread_stream),
-                                        "file: " + src_file);
-                    cudaError_t err = cudaStreamSynchronize(thread_stream->stream());
+                    success = TIME_EXPR(
+                        "read phase 2: copy_buffer_to_gpu_tensors",
+                        copy_buffer_to_gpu_tensors(host_buf,
+                                                   block_ids,
+                                                   dst_tensors,
+                                                   gpu_blocks_per_file,
+                                                   *thread_stream),
+                        "file: " + src_file);
+                    cudaError_t err =
+                        cudaStreamSynchronize(thread_stream->stream());
                     if (err != cudaSuccess) {
-                        std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
+                        std::cerr << "[ERROR] cudaStreamSynchronize failed: "
+                                  << cudaGetErrorString(err) << std::endl;
                         success = false;
                     }
                 } catch (const std::exception& e) {
-                    std::cerr << "[ERROR] Stage2 copy_and_swap failed for " << src_file << ": " << e.what() << std::endl;
+                    std::cerr << "[ERROR] Stage2 copy_and_swap failed for "
+                              << src_file << ": " << e.what() << std::endl;
                     success = false;
                 } catch (...) {
-                    std::cerr << "[ERROR] Stage2 unknown failure for " << src_file << std::endl;
+                    std::cerr << "[ERROR] Stage2 unknown failure for "
+                              << src_file << std::endl;
                     success = false;
                 }
             }
@@ -312,7 +354,8 @@ bool transfer_async_get(int job_id,
             return success;
         });
 
-        // Convert std::future → std::shared_future- is copyable and can be waited on by multiple threads.
+        // Convert std::future → std::shared_future- is copyable and can be
+        // waited on by multiple threads.
         job_state->futures.push_back(future.share());
     }
 

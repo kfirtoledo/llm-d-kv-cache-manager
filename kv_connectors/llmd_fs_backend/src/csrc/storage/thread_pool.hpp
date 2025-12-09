@@ -41,7 +41,10 @@ extern thread_local size_t thread_stream_idx;
 // concurrently with full I/O–GPU overlap.
 class ThreadPool {
    public:
-    ThreadPool(size_t threads, size_t staging_buffer_mb, int tp_rank, int device_id);
+    ThreadPool(size_t threads,
+               size_t staging_buffer_mb,
+               int tp_rank,
+               int device_id);
 
     ~ThreadPool();
 
@@ -52,8 +55,9 @@ class ThreadPool {
     std::vector<std::thread> workers;         // All worker threads
     std::queue<std::function<void()>> tasks;  // Queue of pending tasks
 
-    std::mutex queue_mutex;             // Protects access to the task queue
-    std::condition_variable condition;  // Signals workers when tasks are available
+    std::mutex queue_mutex;  // Protects access to the task queue
+    std::condition_variable
+        condition;  // Signals workers when tasks are available
 
     std::atomic<bool> stop{false};  // Tells workers to stop and exit
     int m_device_id;                // CUDA device this thread pool is bound to
@@ -66,7 +70,8 @@ auto ThreadPool::enqueue(F&& f) -> std::future<std::invoke_result_t<F>> {
     using return_type = std::invoke_result_t<F>;
 
     // Wrap the callable into a packaged_task so we can return a future
-    auto task = std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
+    auto task =
+        std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
 
     // Future for the caller to wait on
     std::future<return_type> res = task->get_future();
