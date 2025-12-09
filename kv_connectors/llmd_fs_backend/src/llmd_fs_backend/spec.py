@@ -54,12 +54,6 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
         self._gpu_to_storage: Optional[OffloadingHandler] = None
         self._storage_to_gpu: Optional[OffloadingHandler] = None
 
-    @property
-    def num_blocks(self) -> int:
-        if self._num_blocks is None:
-            self._num_blocks = self.extra_config.get(
-                "num_shared_blocks", self.vllm_config.cache_config.num_gpu_blocks)
-        return self._num_blocks
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:

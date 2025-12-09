@@ -76,7 +76,7 @@ class StorageOffloadingHandler(OffloadingHandler):
         if isinstance(block_hash, bytes): # convert bytes to int
             block_hash = int.from_bytes(block_hash, "little")
         block_hash_hex = f"{block_hash & ((1 << 64) - 1):016x}"
-        subfolder1, subfolder2 = block_hash_hex[:8], block_hash_hex[8:16]
+        subfolder1, subfolder2 = block_hash_hex[:3], block_hash_hex[3:5]
         full_path = base_path / subfolder1 / subfolder2 / f"{block_hash_hex}.bin"
         os.makedirs(full_path.parent, exist_ok=True)
         return full_path
