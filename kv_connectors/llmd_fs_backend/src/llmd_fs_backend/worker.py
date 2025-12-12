@@ -158,6 +158,9 @@ class StorageOffloadingHandler(OffloadingHandler):
             list_layers_before_num_blocks,
         )
 
+    def wait(self, job_ids: set[int]):
+        for job_id in job_ids:
+            storage_offload.wait_job(job_id)
 # ----------------------------------------------------------------------
 # GPU → Storage (PUT)
 # ----------------------------------------------------------------------

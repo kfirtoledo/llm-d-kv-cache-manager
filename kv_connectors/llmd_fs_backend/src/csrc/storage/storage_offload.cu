@@ -162,6 +162,21 @@ void cleanup_resources() {
     }
 }
 
+
+void wait_job(int job_id) {
+    std::vector<std::shared_future<bool>> futures;
+
+    {
+        std::lock_guard<std::mutex> lock(jobs_mutex);
+        auto it = jobs.find(job_id);
+        if (it == jobs.end()) return;
+        futures = it->second->futures;
+    }
+
+    for (auto& fut : futures) {
+        fut.wait();
+    }
+}
 // -------------------------------
 // Put and Get operations
 // -------------------------------
@@ -353,4 +368,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("all_block_ids"),
           py::arg("dst_tensors"),
           py::arg("gpu_blocks_per_file"));
+    
+    m.def("wait_job", 
+        &wait_job, 
+        py::arg("job_id"));
 }
+
