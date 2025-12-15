@@ -23,7 +23,7 @@ setup(
         CUDAExtension("storage_offload",
                       sources=[
                           "src/csrc/storage/storage_offload.cu",
-                          "src/csrc/storage/buffer.cpp",
+                          "src/csrc/storage/numa_utils.cpp",
                           "src/csrc/storage/file_io.cpp",
                           "src/csrc/storage/thread_pool.cpp",
                           "src/csrc/storage/tensor_copy.cu",
