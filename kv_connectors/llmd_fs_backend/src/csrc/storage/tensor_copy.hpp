@@ -27,21 +27,23 @@ struct ConnectorConfig {
     // True if the layer dimension appears before the num_blocks dimension.
     bool layers_before_blocks;
     // Index of the num_blocks dimension within the tensor shape.
-    int block_axis;
+    int num_blocks_dimension;
 };
 
 extern ConnectorConfig g_connector_config;
 
-// Copy selected GPU blocks into a staging CPU buffer.
+// Copy selected GPU blocks into a staging CPU tensor.
 // Returns a staging CPU tensor containing raw K/V block bytes.
-torch::Tensor copy_gpu_tensors_to_buffer(
+bool copy_gpu_tensors_to_cpu_tensor(
     const std::vector<torch::Tensor>& src_tensors,
     const std::vector<int64_t>& block_ids_list,
+    torch::Tensor& cpu_tensor,
     const c10::cuda::CUDAStream& stream);
 
 // Copy data from a staging CPU buffer back into GPU tensors
-bool copy_buffer_to_gpu_tensors(torch::Tensor cpu_buf,
-                                const std::vector<int64_t>& block_ids_list,
-                                const std::vector<torch::Tensor>& dst_tensors,
-                                int num_blocks_in_file,
-                                const c10::cuda::CUDAStream& stream);
+bool copy_cpu_tensor_to_gpu_tensors(
+    torch::Tensor& cpu_tensor,
+    const std::vector<int64_t>& block_ids_list,
+    const std::vector<torch::Tensor>& dst_tensors,
+    int num_blocks_in_file,
+    const c10::cuda::CUDAStream& stream);

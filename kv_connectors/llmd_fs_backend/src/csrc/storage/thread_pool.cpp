@@ -29,11 +29,16 @@
 #include <numa.h>
 
 #include "thread_pool.hpp"
-#include "buffer.hpp"
+#include "numa_utils.hpp"
 #include "debug_utils.hpp"
+
+// Minimum staging buffer size: 16 MB
+const size_t MIN_STAGING_BUFFER_SIZE = 16 * 1024 * 1024;
 
 // Thread-local index for CUDA streams
 extern thread_local size_t thread_stream_idx;
+// Thread-local buffer used by each IO thread
+thread_local StagingBufferInfo t_staging_buffer{};
 
 // ThreadPool constructor
 ThreadPool::ThreadPool(size_t threads,
@@ -41,17 +46,16 @@ ThreadPool::ThreadPool(size_t threads,
                        int tp_rank,
                        int device_id)
     : m_device_id(device_id) {
-    // Initialize PyTorch threading globally (main thread only)
-    // at::init_num_threads();
-    // at::set_num_threads(1);
-
     // Get GPU NUMA node ONCE outside the thread loop
+    std::vector<int> local_cpus;
     int gpu_numa = get_gpu_numa_node(device_id);
-    std::cout << "[INFO] GPU " << device_id << " mapped to NUMA node "
-              << gpu_numa << "\n";
+    if (gpu_numa >= 0) {
+        std::cout << "[INFO] GPU " << device_id << " mapped to NUMA node "
+                  << gpu_numa << "\n";
 
-    // Get all CPUs in that NUMA node
-    auto local_cpus = get_cpus_in_numa_node(gpu_numa);
+        // Get all CPUs in that NUMA node
+        local_cpus = get_cpus_in_numa_node(gpu_numa);
+    }
 
     if (local_cpus.empty()) {
         std::cerr << "[WARN] No CPUs found for NUMA node " << gpu_numa
@@ -64,8 +68,8 @@ ThreadPool::ThreadPool(size_t threads,
     }
 
     // Log available CPUs
-    std::cout << "CPUs available for GPU " << device_id << " (NUMA " << gpu_numa
-              << "): ";
+    std::cout << "[INFO] CPUs available for GPU " << device_id << " (NUMA "
+              << gpu_numa << "): ";
     for (int cpu : local_cpus) std::cout << cpu << " ";
     std::cout << "\n";
 
@@ -103,20 +107,24 @@ ThreadPool::ThreadPool(size_t threads,
                                      << ", tp_rank=" << tp_rank
                                      << ") pinned to CPU " << cpu_id);
 
-            // Attach preallocated staging buffer for this thread
-            if (i < g_staging_buffers.size() &&
-                g_staging_buffers[i].ptr != nullptr) {
-                t_staging_buffer.ptr = g_staging_buffers[i].ptr;
-                t_staging_buffer.size = g_staging_buffers[i].size;
-                DEBUG_PRINT("IO thread "
-                            << i << " attached to preallocated staging buffer "
-                            << (t_staging_buffer.size / (1024 * 1024))
-                            << " MB");
-            } else {
-                std::cerr << "[WARN] IO thread " << i
-                          << " has no preallocated staging buffer; it will "
-                             "allocate one on first use.\n";
+            // Allocate thread-local staging buffer for this IO thread
+            size_t alloc_bytes = staging_buffer_mb * 1024 * 1024;
+            StagingBufferInfo buf =
+                get_thread_local_staging_buffer(alloc_bytes);
+
+            if (!buf.ptr) {
+                std::cerr << "[ERROR] Failed to allocate staging buffer for IO "
+                             "thread "
+                          << i << "\n";
+                return;
             }
+
+            t_staging_buffer.ptr = buf.ptr;
+            t_staging_buffer.size = buf.size;
+
+            DEBUG_PRINT("IO thread " << i << " allocated staging buffer "
+                                     << (t_staging_buffer.size / (1024 * 1024))
+                                     << " MB");
 
             // Each thread gets its own CUDA stream index
             thread_stream_idx = i;
@@ -167,4 +175,40 @@ ThreadPool::~ThreadPool() {
     for (std::thread& worker : workers) {
         worker.join();
     }
+}
+
+// Return thread-local staging buffer, allocating or reallocating if needed
+StagingBufferInfo get_thread_local_staging_buffer(size_t required_bytes) {
+    if (!t_staging_buffer.ptr || t_staging_buffer.size < required_bytes) {
+        if (t_staging_buffer.ptr) {
+            cudaFreeHost(t_staging_buffer.ptr);
+            t_staging_buffer.ptr = nullptr;
+            t_staging_buffer.size = 0;
+            std::cerr << "[WARN] Thread " << std::this_thread::get_id()
+                      << " existing staging buffer too small ("
+                      << t_staging_buffer.size << " bytes), reallocating "
+                      << required_bytes << " bytes\n";
+        }
+
+        size_t alloc_size = std::max(required_bytes, MIN_STAGING_BUFFER_SIZE);
+        cudaError_t err =
+            cudaHostAlloc(&t_staging_buffer.ptr,
+                          alloc_size,
+                          cudaHostAllocMapped | cudaHostAllocPortable);
+
+        if (err != cudaSuccess) {
+            std::cerr << "[ERROR] cudaHostAlloc failed: "
+                      << cudaGetErrorString(err) << "\n";
+            t_staging_buffer.ptr = nullptr;
+            t_staging_buffer.size = 0;
+        } else {
+            t_staging_buffer.size = alloc_size;
+            DEBUG_PRINT("[INFO] Thread " << std::this_thread::get_id()
+                                         << " allocated staging buffer "
+                                         << (alloc_size / (1024 * 1024))
+                                         << " MB");
+        }
+    }
+
+    return t_staging_buffer;
 }

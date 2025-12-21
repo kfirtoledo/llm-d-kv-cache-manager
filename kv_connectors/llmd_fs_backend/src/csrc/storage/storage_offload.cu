@@ -29,7 +29,7 @@
 #include <numa.h>
 
 #include "file_io.hpp"
-#include "buffer.hpp"
+#include "numa_utils.hpp"
 #include "thread_pool.hpp"
 #include "debug_utils.hpp"
 #include "tensor_copy.hpp"
@@ -78,11 +78,11 @@ void init_resources(int io_threads,
                     int tp_rank,
                     bool kv_before_blocks,
                     bool layers_before_blocks,
-                    int block_axis) {
+                    int num_blocks_dimension) {
     // Save layout flags globally
     g_connector_config.kv_before_blocks = kv_before_blocks;
     g_connector_config.layers_before_blocks = layers_before_blocks;
-    g_connector_config.block_axis = block_axis;
+    g_connector_config.num_blocks_dimension = num_blocks_dimension;
 
     if (!g_io_pool) {
         if (io_threads == 0) {
@@ -103,8 +103,6 @@ void init_resources(int io_threads,
         cudaSetDeviceFlags(cudaDeviceMapHost);
         int gpu_numa = get_gpu_numa_node(device_id);
         numa_set_preferred(gpu_numa);
-        // Pre-allocate staging buffers before launching threads
-        preallocate_staging_buffers(io_threads, staging_buffer_size_mb);
 
         // Pass device_id to thread pool
         g_io_pool = std::make_unique<ThreadPool>(io_threads,
@@ -191,99 +189,108 @@ void wait_job(int job_id) {
 // -------------------------------
 // Async GPU → Storage transfer (PUT)
 bool transfer_async_put(int job_id,
-                        std::vector<std::string> target_files,
+                        std::vector<std::string> dst_files,
                         std::vector<torch::Tensor> src_tensors,
                         std::vector<std::vector<int64_t>> all_block_ids) {
     // Create job state object that will track progress and futures for this
     // job.
     auto job_state = std::make_unique<JobState>();
-    job_state->total_tasks = target_files.size();
+    job_state->total_tasks = dst_files.size();
 
     // Store shared_ptr to tensors to avoid repeated refcount changes
     auto shared_src_tensors =
         std::make_shared<std::vector<torch::Tensor>>(std::move(src_tensors));
 
-    // For each target file, enqueue one async task in the I/O thread pool.
-    for (size_t i = 0; i < target_files.size(); i++) {
-        std::string target = target_files[i];
+    // For each dst_file file, enqueue one async task in the I/O thread pool.
+    for (size_t i = 0; i < dst_files.size(); i++) {
+        std::string dst_file = dst_files[i];
         auto bids = all_block_ids[i];
 
-        auto future =
-            g_io_pool->enqueue([target,
-                                bids,
-                                shared_src_tensors,
-                                job_state = job_state.get()]() -> bool {
-                // Check if target file already exists - skip write if it does
-                if (std::ifstream(target).good()) {
-                    update_atime(target);
-                    job_state->completed_tasks.fetch_add(1);
-                    return true;  // File exists
+        auto future = g_io_pool->enqueue([dst_file,
+                                          bids,
+                                          shared_src_tensors,
+                                          job_state =
+                                              job_state.get()]() -> bool {
+            // Check if dst_file file already exists - skip write if it does
+            if (std::ifstream(dst_file).good()) {
+                update_atime(dst_file);
+                job_state->completed_tasks.fetch_add(1);
+                return true;  // File exists
+            }
+            // Ensure correct device is set (thread-local)
+            int device_id;
+            cudaGetDevice(&device_id);
+
+            // Each thread gets a dedicated CUDA stream for async GPU ops.
+            if (!thread_stream.has_value()) {
+                // thread_stream = g_streams_pool[thread_stream_idx %
+                // g_streams_pool.size()];
+                thread_stream = at::cuda::getStreamFromPool(
+                    /* isHighPriority = */ false);  // use best-effort
+                                                    // stream for writes
+            }
+
+            // Save current CUDA stream so we can restore it later.
+            auto current_stream = at::cuda::getCurrentCUDAStream();
+            at::cuda::setCurrentCUDAStream(*thread_stream);
+
+            bool success = false;
+            try {
+                // Use reference to avoid copy - dereference shared_ptr
+                const auto& src = *shared_src_tensors;
+                torch::Tensor cpu_tensor;
+                // Stage 1: copy tensors from GPU to staging CPU tensor.
+                success =
+                    TIME_EXPR("write phase 1: copy_gpu_tensors_to_cpu_tensor",
+                              copy_gpu_tensors_to_cpu_tensor(src,
+                                                             bids,
+                                                             cpu_tensor,
+                                                             *thread_stream),
+                              "file: " + dst_file);
+
+                cudaError_t err =
+                    cudaStreamSynchronize(thread_stream->stream());
+                if (err != cudaSuccess) {
+                    std::cerr << "[ERROR] cudaStreamSynchronize failed: "
+                              << cudaGetErrorString(err) << std::endl;
                 }
-                // Ensure correct device is set (thread-local)
-                int device_id;
-                cudaGetDevice(&device_id);
 
-                // Each thread gets a dedicated CUDA stream for async GPU ops.
-                if (!thread_stream.has_value()) {
-                    // thread_stream = g_streams_pool[thread_stream_idx %
-                    // g_streams_pool.size()];
-                    thread_stream = at::cuda::getStreamFromPool(
-                        /* isHighPriority = */ false);  // use best-effort
-                                                        // stream for writes
-                }
+                if (!success) {
+                    std::cerr << "[ERROR] PUT failed during GPU->CPU staging: "
+                              << dst_file << "\n";
+                } else {
+                    // Stage 2: Write the cpu tensor to disk.
+                    success = TIME_EXPR(
+                        "write phase 2: write_tensor_to_file",
+                        write_tensor_to_file(cpu_tensor, dst_file),
+                        ("file:" + dst_file +
+                         " size:" + std::to_string(cpu_tensor.nbytes())));
 
-                // Save current CUDA stream so we can restore it later.
-                auto current_stream = at::cuda::getCurrentCUDAStream();
-                at::cuda::setCurrentCUDAStream(*thread_stream);
-
-                try {
-                    // Use reference to avoid copy - dereference shared_ptr
-                    const auto& src = *shared_src_tensors;
-
-                    // Stage 1: copy tensors from GPU to staging CPU buffer.
-                    auto host_buf = TIME_EXPR(
-                        "write phase 1: copy_gpu_tensors_to_buffer",
-                        copy_gpu_tensors_to_buffer(src, bids, *thread_stream),
-                        "file: " + target);
-
-                    cudaError_t err =
-                        cudaStreamSynchronize(thread_stream->stream());
-                    if (err != cudaSuccess) {
-                        std::cerr << "[ERROR] cudaStreamSynchronize failed: "
-                                  << cudaGetErrorString(err) << std::endl;
-                    }
-
-                    // Stage 2: Write the staging buffer to disk.
-                    bool ok = TIME_EXPR("write phase 2: write_tensor_to_file",
-                                        write_tensor_to_file(host_buf, target),
-                                        ("file:" + target + " size:" +
-                                         std::to_string(host_buf.nbytes())));
-
-                    if (!ok)
+                    if (!success)
                         std::cerr << "[ERROR] PUT failed during file write: "
-                                  << target << "\n";
-
-                    // Restore original CUDA stream for safety.
-                    at::cuda::setCurrentCUDAStream(current_stream);
-
-                    // Mark task completion.
-                    job_state->completed_tasks.fetch_add(1);
-
-                    // if (!ok) job_state->all_success = false; // TODO- silent
-                    // ignore write failures for now offloading connector not
-                    // able to handle failures
-                    return ok;
-
-                } catch (...) {
-                    at::cuda::setCurrentCUDAStream(current_stream);
-                    job_state->completed_tasks.fetch_add(1);
-                    job_state->all_success = false;
-                    std::cerr << "[ERROR] PUT failed for " << target << "\n";
-                    return false;
+                                  << dst_file << "\n";
                 }
-            });
-        // Convert std::future → std::shared_future- is copyable and can be
-        // waited on by multiple threads.
+            } catch (const std::exception& e) {
+                std::cerr << "[ERROR] PUT failed for " << dst_file << ": "
+                          << e.what() << std::endl;
+                success = false;
+            } catch (...) {
+                std::cerr << "[ERROR] PUT failed for " << dst_file << "\n";
+                success = false;
+            }
+
+            // Restore original CUDA stream for safety.
+            at::cuda::setCurrentCUDAStream(current_stream);
+
+            // Mark task completion.
+            job_state->completed_tasks.fetch_add(1);
+            // if (!success) job_state->all_success = false; // TODO- silent
+            // ignore write failures for now offloading connector not
+            // able to handle failures
+            return success;
+        });
+        // Convert std::future → std::shared_future, which is copyable and can
+        // be waited on by multiple threads.
         job_state->futures.push_back(future.share());
     }
 
@@ -295,17 +302,17 @@ bool transfer_async_put(int job_id,
 
 // Async Storage → GPU transfer (GET)
 bool transfer_async_get(int job_id,
-                        std::vector<std::string> source_files,
+                        std::vector<std::string> src_files,
                         std::vector<std::vector<int64_t>> all_block_ids,
                         std::vector<torch::Tensor> dst_tensors,
                         int gpu_blocks_per_file) {
     // Create job state object to track progress and futures for this job.
     auto job_state = std::make_unique<JobState>();
-    job_state->total_tasks = source_files.size();
+    job_state->total_tasks = src_files.size();
 
     // For each source file, enqueue one async task in the I/O thread pool.
-    for (size_t i = 0; i < source_files.size(); i++) {
-        std::string src_file = source_files[i];
+    for (size_t i = 0; i < src_files.size(); i++) {
+        std::string src_file = src_files[i];
         auto block_ids = all_block_ids[i];
         auto future = g_io_pool->enqueue([=,
                                           job_state =
@@ -322,26 +329,28 @@ bool transfer_async_get(int job_id,
             auto current_stream = at::cuda::getCurrentCUDAStream();
             at::cuda::setCurrentCUDAStream(*thread_stream);
 
-            // Stage 1: Read file to staging CPU buffer.
             bool success = false;
-            torch::Tensor host_buf;
-            // Read data from disk into a tensor.
-            success = TIME_EXPR("read phase 1: read_tensor_from_file",
-                                read_tensor_from_file(src_file, host_buf),
-                                ("file:" + src_file));
-            if (!success) {
-                std::cerr << "[ERROR] Stage1 read_tensor_from_file failed for "
-                          << src_file << std::endl;
-            } else {
-                try {  // Stage 2:  copy tensors from staging CPU buffer to GPU.
-                       // Perform asynchronous GPU copy and tensor swap.
+            try {
+                // Stage 1: Read file to staging CPU tensor.
+                torch::Tensor cpu_tensor;
+                // Read data from disk into a tensor.
+                success = TIME_EXPR("read phase 1: read_tensor_from_file",
+                                    read_tensor_from_file(src_file, cpu_tensor),
+                                    ("file:" + src_file));
+                if (!success) {
+                    std::cerr
+                        << "[ERROR] Stage1 read_tensor_from_file failed for "
+                        << src_file << std::endl;
+                } else {
+                    // Stage 2:  copy tensors from staging CPU tensor to GPU.
+                    // Perform asynchronous GPU copy and tensor swap.
                     success = TIME_EXPR(
-                        "read phase 2: copy_buffer_to_gpu_tensors",
-                        copy_buffer_to_gpu_tensors(host_buf,
-                                                   block_ids,
-                                                   dst_tensors,
-                                                   gpu_blocks_per_file,
-                                                   *thread_stream),
+                        "read phase 2: copy_cpu_tensor_to_gpu_tensors",
+                        copy_cpu_tensor_to_gpu_tensors(cpu_tensor,
+                                                       block_ids,
+                                                       dst_tensors,
+                                                       gpu_blocks_per_file,
+                                                       *thread_stream),
                         "file: " + src_file);
                     cudaError_t err =
                         cudaStreamSynchronize(thread_stream->stream());
@@ -350,15 +359,15 @@ bool transfer_async_get(int job_id,
                                   << cudaGetErrorString(err) << std::endl;
                         success = false;
                     }
-                } catch (const std::exception& e) {
-                    std::cerr << "[ERROR] Stage2 copy_and_swap failed for "
-                              << src_file << ": " << e.what() << std::endl;
-                    success = false;
-                } catch (...) {
-                    std::cerr << "[ERROR] Stage2 unknown failure for "
-                              << src_file << std::endl;
-                    success = false;
                 }
+            } catch (const std::exception& e) {
+                std::cerr << "[ERROR] GET failed for " << src_file << ": "
+                          << e.what() << std::endl;
+                success = false;
+            } catch (...) {
+                std::cerr << "[ERROR] GET unknown failure for " << src_file
+                          << std::endl;
+                success = false;
             }
 
             // Final cleanup & accounting
@@ -391,7 +400,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("tp_rank"),
           py::arg("kv_before_blocks"),
           py::arg("layers_before_blocks"),
-          py::arg("block_axis"));
+          py::arg("num_blocks_dimension"));
 
     m.def("cleanup_resources", &cleanup_resources);
 
@@ -400,14 +409,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("transfer_async_put",
           &transfer_async_put,
           py::arg("job_id"),
-          py::arg("target_files"),
+          py::arg("dst_files"),
           py::arg("all_src_tensors"),
           py::arg("all_block_ids"));
 
     m.def("transfer_async_get",
           &transfer_async_get,
           py::arg("job_id"),
-          py::arg("source_files"),
+          py::arg("src_files"),
           py::arg("all_block_ids"),
           py::arg("dst_tensors"),
           py::arg("gpu_blocks_per_file"));

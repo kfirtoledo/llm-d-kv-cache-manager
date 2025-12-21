@@ -28,8 +28,15 @@
 
 #include <cuda_runtime.h>
 
-#include "buffer.hpp"
 #include "debug_utils.hpp"
+
+struct StagingBufferInfo {
+    void* ptr = nullptr;
+    size_t size = 0;
+};
+
+// Thread-local staging pointers
+extern thread_local StagingBufferInfo t_staging_buffer;
 
 // Thread-local storage used by each I/O thread
 extern thread_local size_t thread_stream_idx;
@@ -94,3 +101,6 @@ auto ThreadPool::enqueue(F&& f) -> std::future<std::invoke_result_t<F>> {
 
     return res;
 }
+
+// Return thread-local staging buffer, allocating or reallocating if needed
+StagingBufferInfo get_thread_local_staging_buffer(size_t required_bytes);

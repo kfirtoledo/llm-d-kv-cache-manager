@@ -7,7 +7,7 @@
 #include <iostream>
 
 #include "tensor_copy.hpp"
-#include "buffer.hpp"
+#include "thread_pool.hpp"
 #include "debug_utils.hpp"
 
 //----------------------------------------------------------------------
@@ -16,33 +16,36 @@
 
 // Encapsulates KV cache block layout and dimensions
 struct CacheLayout {
-    int64_t num_blocks;         // Number of blocks, from block_axis
+    int64_t num_blocks;         // Number of blocks, from num_blocks_dimension
     size_t bytes_per_block;     // Bytes for each block, calculated from
-                                // stride[block_axis] * element_size
+                                // stride[num_blocks_dimension] * element_size
     size_t elem_size;           // Bytes per tensor element
-    int block_axis;             // Which axis is the block index
-    bool kv_before_blocks;      // True if K/V dimension is before block_axis
-    bool layers_before_blocks;  // True if layer dimension is before block_axis
+    int num_blocks_dimension;   // Which axis is the block index
+    bool kv_before_blocks;      // True if {k,v} dimension is before
+                                // num_blocks_dimension
+    bool layers_before_blocks;  // True if layer dimension is before
+                                // num_blocks_dimension
     size_t kv_bytes_per_plane;  // Bytes per K or V plane use only when
                                 // kv_before_blocks is true
 
     // Factory method to extract layout from tensor shape
     static CacheLayout from_tensor(const torch::Tensor& ref,
-                                   int block_axis,
+                                   int num_blocks_dimension,
                                    bool kv_before_blocks,
                                    bool layers_before_blocks) {
-        TORCH_CHECK(block_axis >= 0 && block_axis < ref.dim(),
-                    "block_axis out of bounds!");
-        int64_t num_blocks = ref.size(block_axis);
+        TORCH_CHECK(
+            num_blocks_dimension >= 0 && num_blocks_dimension < ref.dim(),
+            "num_blocks_dimension out of bounds!");
+        int64_t num_blocks = ref.size(num_blocks_dimension);
         size_t elem_size = ref.element_size();
-        size_t bytes_per_plane = ref.stride(block_axis) * elem_size;
+        size_t bytes_per_plane = ref.stride(num_blocks_dimension) * elem_size;
 
         CacheLayout layout;
         layout.num_blocks = num_blocks;
         layout.bytes_per_block =
             kv_before_blocks ? bytes_per_plane * 2 : bytes_per_plane;
         layout.elem_size = elem_size;
-        layout.block_axis = block_axis;
+        layout.num_blocks_dimension = num_blocks_dimension;
         layout.kv_before_blocks = kv_before_blocks;
         layout.layers_before_blocks = layers_before_blocks;
         layout.kv_bytes_per_plane = bytes_per_plane;
@@ -433,12 +436,11 @@ void transfer_kv_blocks(
 //----------------------------------------------------------------------
 // GPU → Storage (PUT)
 //----------------------------------------------------------------------
-
-// Copy selected GPU K/V blocks into a single staging CPU buffer.
-// The staging buffer is returned as a CPU tensor (no copy, just a view).
-torch::Tensor copy_gpu_tensors_to_buffer(
+// Copy selected GPU K/V blocks into a single staging CPU tensor.
+bool copy_gpu_tensors_to_cpu_tensor(
     const std::vector<torch::Tensor>& src_tensors,
     const std::vector<int64_t>& block_ids_list,
+    torch::Tensor& cpu_tensor,
     const c10::cuda::CUDAStream& stream) {
     TORCH_CHECK(!src_tensors.empty(), "Source tensors list is empty");
     const auto& ref = src_tensors[0];
@@ -447,7 +449,7 @@ torch::Tensor copy_gpu_tensors_to_buffer(
     // Extract tensor geometry
     auto layout =
         CacheLayout::from_tensor(ref,
-                                 g_connector_config.block_axis,
+                                 g_connector_config.num_blocks_dimension,
                                  g_connector_config.kv_before_blocks,
                                  g_connector_config.layers_before_blocks);
     const int num_layers = static_cast<int>(src_tensors.size());
@@ -469,12 +471,12 @@ torch::Tensor copy_gpu_tensors_to_buffer(
         static_cast<int64_t>(total_bytes / layout.elem_size);
 
     // Wrap staging buffer as tensor view (no copy)
-    torch::Tensor result_cpu = torch::from_blob(buf.ptr,
-                                                {total_elements},
-                                                torch::TensorOptions()
-                                                    .dtype(dtype)
-                                                    .device(torch::kCPU)
-                                                    .pinned_memory(true));
+    cpu_tensor = torch::from_blob(buf.ptr,
+                                  {total_elements},
+                                  torch::TensorOptions()
+                                      .dtype(dtype)
+                                      .device(torch::kCPU)
+                                      .pinned_memory(true));
 
     auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
 
@@ -493,40 +495,41 @@ torch::Tensor copy_gpu_tensors_to_buffer(
 
     // Reinterpret bfloat16 tensor as uint16_t for safe raw byte access (I/O or
     // memcpy)
-    if (result_cpu.dtype() == torch::kBFloat16) {
-        result_cpu = result_cpu.view(torch::kUInt16);
+    if (cpu_tensor.dtype() == torch::kBFloat16) {
+        cpu_tensor = cpu_tensor.view(torch::kUInt16);
     }
 
-    return result_cpu;
+    return true;
 }
 
 //----------------------------------------------------------------------
 // Storage → GPU (GET)
 //----------------------------------------------------------------------
 
-bool copy_buffer_to_gpu_tensors(torch::Tensor cpu_buf,
-                                const std::vector<int64_t>& block_ids_list,
-                                const std::vector<torch::Tensor>& dst_tensors,
-                                int num_blocks_in_file,
-                                const c10::cuda::CUDAStream& stream) {
+bool copy_cpu_tensor_to_gpu_tensors(
+    torch::Tensor& cpu_tensor,
+    const std::vector<int64_t>& block_ids_list,
+    const std::vector<torch::Tensor>& dst_tensors,
+    int num_blocks_in_file,
+    const c10::cuda::CUDAStream& stream) {
     TORCH_CHECK(!dst_tensors.empty(), "Destination tensors list is empty");
     const auto& ref = dst_tensors[0];
     TORCH_CHECK(ref.is_contiguous(), "dst_tensors must be contiguous");
-    TORCH_CHECK(cpu_buf.is_contiguous(), "cpu buffer must be contiguous");
+    TORCH_CHECK(cpu_tensor.is_contiguous(), "cpu buffer must be contiguous");
 
-    // Verify cpu_buf is pinned memory
-    TORCH_CHECK(cpu_buf.is_pinned(),
-                "cpu_buf must be pinned memory for kernel-based copy");
+    // Verify cpu_tensor is pinned memory
+    TORCH_CHECK(cpu_tensor.is_pinned(),
+                "cpu_tensor must be pinned memory for kernel-based copy");
 
     // Extract tensor geometry
     auto layout =
         CacheLayout::from_tensor(ref,
-                                 g_connector_config.block_axis,
+                                 g_connector_config.num_blocks_dimension,
                                  g_connector_config.kv_before_blocks,
                                  g_connector_config.layers_before_blocks);
     const int num_layers = static_cast<int>(dst_tensors.size());
 
-    auto* cpu_base = cpu_buf.data_ptr<uint8_t>();
+    auto* cpu_base = cpu_tensor.data_ptr<uint8_t>();
 
     // Check environment variable to determine copy method (default: kernel for
     // READ)
