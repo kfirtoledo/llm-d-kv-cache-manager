@@ -225,9 +225,8 @@ def roundtrip_once(*, model_name: str, tp_size: int, tp_rank: int,
 
 
 @pytest.mark.parametrize("group_size", [1, 2, 4, 8])
-@pytest.mark.parametrize(
-    "start_idx",
-    [0, 3])  # 0 = full from start, 3 = partial first group (e.g., 3..7)
+# start_idx 0 = full from start, start_idx = 3, partial first group (e.g., 3..7)
+@pytest.mark.parametrize("start_idx", [0, 3])
 def test_fs_backend_roundtrip_param(group_size: int, start_idx: int):
     """
     End-to-end tests for the fs (shared-storage) offloading backend.

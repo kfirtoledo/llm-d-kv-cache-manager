@@ -14,45 +14,6 @@
 // Helper Structures and Functions
 //----------------------------------------------------------------------
 
-// Encapsulates KV cache block layout and dimensions
-struct CacheLayout {
-    int64_t num_blocks;         // Number of blocks, from num_blocks_dimension
-    size_t bytes_per_block;     // Bytes for each block, calculated from
-                                // stride[num_blocks_dimension] * element_size
-    size_t elem_size;           // Bytes per tensor element
-    int num_blocks_dimension;   // Which axis is the block index
-    bool kv_before_blocks;      // True if {k,v} dimension is before
-                                // num_blocks_dimension
-    bool layers_before_blocks;  // True if layer dimension is before
-                                // num_blocks_dimension
-    size_t kv_bytes_per_plane;  // Bytes per K or V plane use only when
-                                // kv_before_blocks is true
-
-    // Factory method to extract layout from tensor shape
-    static CacheLayout from_tensor(const torch::Tensor& ref,
-                                   int num_blocks_dimension,
-                                   bool kv_before_blocks,
-                                   bool layers_before_blocks) {
-        TORCH_CHECK(
-            num_blocks_dimension >= 0 && num_blocks_dimension < ref.dim(),
-            "num_blocks_dimension out of bounds!");
-        int64_t num_blocks = ref.size(num_blocks_dimension);
-        size_t elem_size = ref.element_size();
-        size_t bytes_per_plane = ref.stride(num_blocks_dimension) * elem_size;
-
-        CacheLayout layout;
-        layout.num_blocks = num_blocks;
-        layout.bytes_per_block =
-            kv_before_blocks ? bytes_per_plane * 2 : bytes_per_plane;
-        layout.elem_size = elem_size;
-        layout.num_blocks_dimension = num_blocks_dimension;
-        layout.kv_before_blocks = kv_before_blocks;
-        layout.layers_before_blocks = layers_before_blocks;
-        layout.kv_bytes_per_plane = bytes_per_plane;
-        return layout;
-    }
-};
-
 // Helper to wrap CPU arrays as GPU tensors for kernel access
 template <typename T>
 torch::Tensor to_gpu_tensor(const std::vector<T>& data) {
@@ -62,30 +23,18 @@ torch::Tensor to_gpu_tensor(const std::vector<T>& data) {
         .to(torch::kCUDA, /*non_blocking=*/true);
 }
 
-// Helper for reading environment variable flags
-inline bool get_env_flag(const char* name, bool default_val) {
-    const char* env = std::getenv(name);
-    if (!env) return default_val;
-
-    std::string v(env);
-    if (v == "1" || v == "true" || v == "TRUE") return true;
-    if (v == "0" || v == "false" || v == "FALSE") return false;
-
-    return default_val;
-}
-
 inline int64_t compute_cpu_offset(size_t bi,
                                   bool is_put,
                                   int num_layers,
                                   size_t bytes_per_block,
-                                  int64_t gpu_block_idx = 0,
-                                  int num_blocks_in_file = 0) {
+                                  int64_t gpu_block_idx,
+                                  int gpu_blocks_per_file) {
     if (is_put) {
         // PUT - all blocks are stored contiguously in buffer
         return bi * num_layers * bytes_per_block;
     } else {
         // GET - may have only partial blocks to load from the file
-        int64_t lblock = gpu_block_idx % num_blocks_in_file;
+        int64_t lblock = gpu_block_idx % gpu_blocks_per_file;
         return lblock * num_layers * bytes_per_block;
     }
 }
@@ -131,7 +80,8 @@ __global__ void copy_blocks_kernel(
 
     // ----------------------------------------------------------------------
     // Case 1: K/V planes appear before the block dimension
-    // (kv_before_blocks == true AND layers_before_blocks == true)
+    // (kv_before_blocks == true) by default in this case layers_before_blocks
+    // == true
     // ----------------------------------------------------------------------
     if (kv_before_blocks) {
         size_t plane_offset = (k_or_v == 1 ? bytes_per_plane : 0);
@@ -223,10 +173,9 @@ __global__ void copy_blocks_kernel(
 void copy_via_cuda_memcpy(uint8_t* cpu_base,
                           const std::vector<torch::Tensor>& gpu_tensors,
                           const std::vector<int64_t>& block_ids_list,
-                          const CacheLayout& layout,
                           const c10::cuda::CUDAStream& stream,
-                          int num_blocks_in_file,
-                          bool is_put) {
+                          bool is_put,
+                          const ConnectorConfig& cfg) {
     cudaMemcpyKind kind =
         is_put ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
     // Direct pointer arithmetic - no indexing operations
@@ -235,17 +184,29 @@ void copy_via_cuda_memcpy(uint8_t* cpu_base,
         size_t cpu_block_base = compute_cpu_offset(bi,
                                                    is_put,
                                                    gpu_tensors.size(),
-                                                   layout.bytes_per_block,
+                                                   cfg.layout.bytes_per_block,
                                                    gpu_block_idx,
-                                                   num_blocks_in_file);
-        if (layout.layers_before_blocks) {  // Standard layout
+                                                   cfg.gpu_blocks_per_file);
+        std::cout << "[DEBUG] copy_via_kernel: is_put=" << is_put
+                  << ",  cfg.layout.bytes_per_block="
+                  << cfg.layout.bytes_per_block
+                  << ",  cfg.gpu_blocks_per_file=" << cfg.gpu_blocks_per_file
+                  << ", cfg.layout.num_blocks=" << cfg.layout.num_blocks
+                  << ", cfg.layout.kv_bytes_per_plane="
+                  << cfg.layout.kv_bytes_per_plane
+                  << ", cfg.layout.bytes_per_block="
+                  << cfg.layout.bytes_per_block
+                  << ", cfg.layout.kv_before_blocks="
+                  << cfg.layout.kv_before_blocks << std::endl;
+        if (cfg.layout.layers_before_blocks) {  // Standard layout
             for (size_t layer = 0; layer < gpu_tensors.size(); ++layer) {
                 uint8_t* gpu_base =
                     reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
-                size_t block_offset = gpu_block_idx * layout.bytes_per_block;
+                size_t block_offset =
+                    gpu_block_idx * cfg.layout.bytes_per_block;
 
-                if (layout.kv_before_blocks) {
-                    size_t plane = layout.kv_bytes_per_plane;
+                if (cfg.layout.kv_before_blocks) {
+                    size_t plane = cfg.layout.kv_bytes_per_plane;
                     // Compute GPU and CPU offsets for K
                     void* src_K = is_put ? (gpu_base + block_offset)
                                          : (cpu_base + cpu_block_base);
@@ -276,25 +237,26 @@ void copy_via_cuda_memcpy(uint8_t* cpu_base,
                                        : (cpu_base + cpu_block_base);
                     void* dst = is_put ? (cpu_base + cpu_block_base)
                                        : (gpu_base + block_offset);
-                    cudaError_t err = cudaMemcpyAsync(dst,
-                                                      src,
-                                                      layout.bytes_per_block,
-                                                      kind,
-                                                      stream.stream());
+                    cudaError_t err =
+                        cudaMemcpyAsync(dst,
+                                        src,
+                                        cfg.layout.bytes_per_block,
+                                        kind,
+                                        stream.stream());
                     TORCH_CHECK(err == cudaSuccess, "cudaMemcpyAsync failed");
                 }
             }
         } else {  // Cross-layer layout- one copy for all layers
             uint8_t* gpu_base =
                 reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
-            size_t gpu_offset = gpu_block_idx * layout.bytes_per_block;
+            size_t gpu_offset = gpu_block_idx * cfg.layout.bytes_per_block;
             uint8_t* cpu_ptr = cpu_base + cpu_block_base;
 
             const void* src = is_put ? (gpu_base + gpu_offset) : cpu_ptr;
             void* dst = is_put ? cpu_ptr : (gpu_base + gpu_offset);
             cudaError_t err = cudaMemcpyAsync(dst,
                                               src,
-                                              layout.bytes_per_block,
+                                              cfg.layout.bytes_per_block,
                                               kind,
                                               stream.stream());
             TORCH_CHECK(err == cudaSuccess, "cudaMemcpyAsync failed");
@@ -306,10 +268,9 @@ void copy_via_cuda_memcpy(uint8_t* cpu_base,
 void copy_via_kernel(uint8_t* cpu_base,
                      const std::vector<torch::Tensor>& gpu_tensors,
                      const std::vector<int64_t>& block_ids_list,
-                     const CacheLayout& layout,
                      const c10::cuda::CUDAStream& stream,
                      bool is_put,
-                     int num_blocks_in_file) {
+                     const ConnectorConfig& cfg) {
     const int num_layers = static_cast<int>(gpu_tensors.size());
 
     // Calculate CPU buffer offset for each block (maps global block ID to local
@@ -319,11 +280,21 @@ void copy_via_kernel(uint8_t* cpu_base,
         cpu_offsets[bi] = compute_cpu_offset(bi,
                                              is_put,
                                              num_layers,
-                                             layout.bytes_per_block,
+                                             cfg.layout.bytes_per_block,
                                              block_ids_list[bi],
-                                             num_blocks_in_file);
+                                             cfg.gpu_blocks_per_file);
     }
 
+    std::cout << "[DEBUG] copy_via_kernel: is_put=" << is_put
+              << ", num_layers=" << num_layers
+              << ",  cfg.layout.bytes_per_block=" << cfg.layout.bytes_per_block
+              << ",  cfg.gpu_blocks_per_file=" << cfg.gpu_blocks_per_file
+              << ", cfg.layout.num_blocks=" << cfg.layout.num_blocks
+              << ", cfg.layout.kv_bytes_per_plane="
+              << cfg.layout.kv_bytes_per_plane
+              << ", cfg.layout.bytes_per_block=" << cfg.layout.bytes_per_block
+              << ", cfg.layout.kv_before_blocks=" << cfg.layout.kv_before_blocks
+              << std::endl;
     // Wrap block IDs in tensor and copy to GPU for kernel access
     torch::Tensor block_ids_tensor = to_gpu_tensor(block_ids_list);
 
@@ -340,9 +311,9 @@ void copy_via_kernel(uint8_t* cpu_base,
                     "cudaHostGetDevicePointer failed: ",
                     cudaGetErrorString(map_err));
     }
-    if (layout.layers_before_blocks) {  // standard layout
+    if (cfg.layout.layers_before_blocks) {  // standard layout
         dim3 grid(block_ids_list.size(),
-                  layout.kv_before_blocks ? 2 : 1);  // (blocks, K/V)
+                  cfg.layout.kv_before_blocks ? 2 : 1);  // (blocks, K/V)
         dim3 block(COPY_THREADS);
 
         // Launch copy kernel for all the blocks on each layer
@@ -357,11 +328,11 @@ void copy_via_kernel(uint8_t* cpu_base,
                 cpu_offsets_tensor.data_ptr<int64_t>(),
                 block_ids_list.size(),
                 layer,
-                layout.num_blocks,
-                layout.kv_bytes_per_plane,
-                layout.bytes_per_block,
-                layout.kv_before_blocks,
-                layout.layers_before_blocks,
+                cfg.layout.num_blocks,
+                cfg.layout.kv_bytes_per_plane,
+                cfg.layout.bytes_per_block,
+                cfg.layout.kv_before_blocks,
+                cfg.layout.layers_before_blocks,
                 is_put);
         }
 
@@ -372,7 +343,7 @@ void copy_via_kernel(uint8_t* cpu_base,
                     cudaGetErrorString(launch_err));
 
     } else {  // / Cross-layer layout (each block contains all layers)
-        TORCH_CHECK(!layout.kv_before_blocks,
+        TORCH_CHECK(!cfg.layout.kv_before_blocks,
                     "Invalid layout: kv_before_blocks=true but "
                     "layers_before_blocks=false");
 
@@ -389,11 +360,11 @@ void copy_via_kernel(uint8_t* cpu_base,
             cpu_offsets_tensor.data_ptr<int64_t>(),
             block_ids_list.size(),
             /*layer=*/0,  // Ignored in cross-layer layout
-            layout.num_blocks,
-            layout.kv_bytes_per_plane,
-            layout.bytes_per_block,
-            layout.kv_before_blocks,
-            layout.layers_before_blocks,
+            cfg.layout.num_blocks,
+            cfg.layout.kv_bytes_per_plane,
+            cfg.layout.bytes_per_block,
+            cfg.layout.kv_before_blocks,
+            cfg.layout.layers_before_blocks,
             is_put);
 
         cudaError_t launch_err = cudaGetLastError();
@@ -404,32 +375,28 @@ void copy_via_kernel(uint8_t* cpu_base,
 }
 
 // Main transfer function - dispatches to kernel or memcpy path
-void transfer_kv_blocks(
-    uint8_t* cpu_base,
-    const std::vector<torch::Tensor>& gpu_tensors,
-    const std::vector<int64_t>& block_ids_list,
-    const CacheLayout& layout,
-    const c10::cuda::CUDAStream& stream,
-    bool is_put,
-    bool use_kernel,
-    int num_blocks_in_file = 0  // default is 0, ignored for PUT
-) {
+void transfer_kv_blocks(uint8_t* cpu_base,
+                        const std::vector<torch::Tensor>& gpu_tensors,
+                        const std::vector<int64_t>& block_ids_list,
+                        const c10::cuda::CUDAStream& stream,
+                        bool is_put,
+                        const ConnectorConfig& cfg) {
+    bool use_kernel =
+        is_put ? cfg.use_kernel_copy_write : cfg.use_kernel_copy_read;
     if (use_kernel) {
         copy_via_kernel(cpu_base,
                         gpu_tensors,
                         block_ids_list,
-                        layout,
                         stream,
                         is_put,
-                        num_blocks_in_file);
+                        cfg);
     } else {
         copy_via_cuda_memcpy(cpu_base,
                              gpu_tensors,
                              block_ids_list,
-                             layout,
                              stream,
                              is_put,
-                             num_blocks_in_file);
+                             cfg);
     }
 }
 
@@ -441,22 +408,17 @@ bool copy_gpu_tensors_to_cpu_tensor(
     const std::vector<torch::Tensor>& src_tensors,
     const std::vector<int64_t>& block_ids_list,
     torch::Tensor& cpu_tensor,
-    const c10::cuda::CUDAStream& stream) {
+    const c10::cuda::CUDAStream& stream,
+    const ConnectorConfig& cfg) {
     TORCH_CHECK(!src_tensors.empty(), "Source tensors list is empty");
     const auto& ref = src_tensors[0];
     TORCH_CHECK(ref.is_contiguous(), "src_tensors must be contiguous");
 
-    // Extract tensor geometry
-    auto layout =
-        CacheLayout::from_tensor(ref,
-                                 g_connector_config.num_blocks_dimension,
-                                 g_connector_config.kv_before_blocks,
-                                 g_connector_config.layers_before_blocks);
     const int num_layers = static_cast<int>(src_tensors.size());
 
     // Total required staging memory
     const size_t total_bytes =
-        block_ids_list.size() * num_layers * layout.bytes_per_block;
+        block_ids_list.size() * num_layers * cfg.layout.bytes_per_block;
 
     // Fetch or allocate thread-local staging buffer
     StagingBufferInfo buf = get_thread_local_staging_buffer(total_bytes);
@@ -468,7 +430,7 @@ bool copy_gpu_tensors_to_cpu_tensor(
 
     auto dtype = ref.dtype();
     const int64_t total_elements =
-        static_cast<int64_t>(total_bytes / layout.elem_size);
+        static_cast<int64_t>(total_bytes / cfg.layout.elem_size);
 
     // Wrap staging buffer as tensor view (no copy)
     cpu_tensor = torch::from_blob(buf.ptr,
@@ -479,19 +441,15 @@ bool copy_gpu_tensors_to_cpu_tensor(
                                       .pinned_memory(true));
 
     auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
-
-    // Check environment variable to determine copy method
-    bool use_kernel = get_env_flag("USE_KERNEL_COPY_WRITE", false);
     bool is_put = true;
 
     // Execute the copy operation
     transfer_kv_blocks(cpu_base,
                        src_tensors,
                        block_ids_list,
-                       layout,
                        stream,
                        is_put,
-                       use_kernel);
+                       cfg);
 
     // Reinterpret bfloat16 tensor as uint16_t for safe raw byte access (I/O or
     // memcpy)
@@ -510,8 +468,8 @@ bool copy_cpu_tensor_to_gpu_tensors(
     torch::Tensor& cpu_tensor,
     const std::vector<int64_t>& block_ids_list,
     const std::vector<torch::Tensor>& dst_tensors,
-    int num_blocks_in_file,
-    const c10::cuda::CUDAStream& stream) {
+    const c10::cuda::CUDAStream& stream,
+    const ConnectorConfig& cfg) {
     TORCH_CHECK(!dst_tensors.empty(), "Destination tensors list is empty");
     const auto& ref = dst_tensors[0];
     TORCH_CHECK(ref.is_contiguous(), "dst_tensors must be contiguous");
@@ -521,30 +479,19 @@ bool copy_cpu_tensor_to_gpu_tensors(
     TORCH_CHECK(cpu_tensor.is_pinned(),
                 "cpu_tensor must be pinned memory for kernel-based copy");
 
-    // Extract tensor geometry
-    auto layout =
-        CacheLayout::from_tensor(ref,
-                                 g_connector_config.num_blocks_dimension,
-                                 g_connector_config.kv_before_blocks,
-                                 g_connector_config.layers_before_blocks);
-    const int num_layers = static_cast<int>(dst_tensors.size());
-
     auto* cpu_base = cpu_tensor.data_ptr<uint8_t>();
 
     // Check environment variable to determine copy method (default: kernel for
     // READ)
-    bool use_kernel = get_env_flag("USE_KERNEL_COPY_READ", false);
     bool is_put = false;
 
     // Execute the copy operation
     transfer_kv_blocks(cpu_base,
                        dst_tensors,
                        block_ids_list,
-                       layout,
                        stream,
                        is_put,
-                       use_kernel,
-                       num_blocks_in_file);
+                       cfg);
 
     return true;
 }

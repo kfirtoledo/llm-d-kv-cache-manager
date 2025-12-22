@@ -123,13 +123,9 @@ class SingleStorageDirectionOffloadingHandler(OffloadingHandler):
         )
 
         # Submit async GET transfer
-        return storage_offload.transfer_async_get(
-            job_id,
-            src_files,
-            per_file_block_ids,
-            self.tensors,
-            self.gpu_blocks_per_file,
-        )
+        return storage_offload.transfer_async_get(job_id, src_files,
+                                                  per_file_block_ids,
+                                                  self.tensors)
 
     def get_finished(self) -> list[TransferResult]:
         """
@@ -242,6 +238,8 @@ class StorageOffloadingHandlers:
             staging_buffer_size_mb=self.buffer_size_mb,
             max_staging_memory_gb=self.max_staging_memory_gb,
             tp_rank=self.tp_rank,
+            gpu_blocks_per_file=self.gpu_blocks_per_file,
+            ref_tensor=self.tensors[0],
             kv_before_blocks=kv_cache_layout.kv_before_num_blocks[0],
             layers_before_blocks=kv_cache_layout.layers_before_num_blocks[0],
             num_blocks_dimension=kv_cache_layout.num_blocks_idx[0],

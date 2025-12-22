@@ -33,6 +33,7 @@
 #include "thread_pool.hpp"
 #include "debug_utils.hpp"
 #include "tensor_copy.hpp"
+#include "cfg.hpp"
 
 namespace fs = std::filesystem;
 namespace py = pybind11;
@@ -66,7 +67,7 @@ std::map<int, std::unique_ptr<JobState>> jobs;
 // Global IO thread pool for scheduling async PUT/GET tasks
 static std::unique_ptr<ThreadPool> g_io_pool;
 // global connector config instance
-ConnectorConfig g_connector_config;
+std::unique_ptr<ConnectorConfig> g_connector_config;
 // -------------------------------
 // Initialize resources with pre-allocation
 // -------------------------------
@@ -76,14 +77,26 @@ void init_resources(int io_threads,
                     size_t staging_buffer_size_mb,
                     size_t max_staging_memory_gb,
                     int tp_rank,
+                    int gpu_blocks_per_file,
+                    const torch::Tensor& ref_tensor,
                     bool kv_before_blocks,
                     bool layers_before_blocks,
                     int num_blocks_dimension) {
-    // Save layout flags globally
-    g_connector_config.kv_before_blocks = kv_before_blocks;
-    g_connector_config.layers_before_blocks = layers_before_blocks;
-    g_connector_config.num_blocks_dimension = num_blocks_dimension;
+    // Build connector configuration
+    CacheLayout layout(ref_tensor,
+                       num_blocks_dimension,
+                       kv_before_blocks,
+                       layers_before_blocks);
 
+    g_connector_config =
+        std::make_unique<ConnectorConfig>(gpu_blocks_per_file, layout);
+    std::cout << "[DEBUG] ConnectorConfig initialized: "
+              << "gpu_blocks_per_file="
+              << g_connector_config->gpu_blocks_per_file
+              << ", kv_before_blocks="
+              << g_connector_config->layout.kv_before_blocks
+              << ", layers_before_blocks="
+              << g_connector_config->layout.layers_before_blocks << std::endl;
     if (!g_io_pool) {
         if (io_threads == 0) {
             io_threads = std::max(4u, std::thread::hardware_concurrency() / 2);
@@ -240,13 +253,14 @@ bool transfer_async_put(int job_id,
                 const auto& src = *shared_src_tensors;
                 torch::Tensor cpu_tensor;
                 // Stage 1: copy tensors from GPU to staging CPU tensor.
-                success =
-                    TIME_EXPR("write phase 1: copy_gpu_tensors_to_cpu_tensor",
-                              copy_gpu_tensors_to_cpu_tensor(src,
-                                                             bids,
-                                                             cpu_tensor,
-                                                             *thread_stream),
-                              "file: " + dst_file);
+                success = TIME_EXPR(
+                    "write phase 1: copy_gpu_tensors_to_cpu_tensor",
+                    copy_gpu_tensors_to_cpu_tensor(src,
+                                                   bids,
+                                                   cpu_tensor,
+                                                   *thread_stream,
+                                                   *g_connector_config),
+                    "file: " + dst_file);
 
                 cudaError_t err =
                     cudaStreamSynchronize(thread_stream->stream());
@@ -304,8 +318,7 @@ bool transfer_async_put(int job_id,
 bool transfer_async_get(int job_id,
                         std::vector<std::string> src_files,
                         std::vector<std::vector<int64_t>> all_block_ids,
-                        std::vector<torch::Tensor> dst_tensors,
-                        int gpu_blocks_per_file) {
+                        std::vector<torch::Tensor> dst_tensors) {
     // Create job state object to track progress and futures for this job.
     auto job_state = std::make_unique<JobState>();
     job_state->total_tasks = src_files.size();
@@ -349,8 +362,8 @@ bool transfer_async_get(int job_id,
                         copy_cpu_tensor_to_gpu_tensors(cpu_tensor,
                                                        block_ids,
                                                        dst_tensors,
-                                                       gpu_blocks_per_file,
-                                                       *thread_stream),
+                                                       *thread_stream,
+                                                       *g_connector_config),
                         "file: " + src_file);
                     cudaError_t err =
                         cudaStreamSynchronize(thread_stream->stream());
@@ -398,6 +411,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("staging_buffer_size_mb"),
           py::arg("max_staging_memory_gb"),
           py::arg("tp_rank"),
+          py::arg("gpu_blocks_per_file"),
+          py::arg("ref_tensor"),
           py::arg("kv_before_blocks"),
           py::arg("layers_before_blocks"),
           py::arg("num_blocks_dimension"));
@@ -418,8 +433,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("job_id"),
           py::arg("src_files"),
           py::arg("all_block_ids"),
-          py::arg("dst_tensors"),
-          py::arg("gpu_blocks_per_file"));
+          py::arg("dst_tensors"));
 
     m.def("wait_job", &wait_job, py::arg("job_id"));
 }
