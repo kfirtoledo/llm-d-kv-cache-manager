@@ -123,13 +123,9 @@ class SingleStorageDirectionOffloadingHandler(OffloadingHandler):
         )
 
         # Submit async GET transfer
-        return storage_offload.transfer_async_get(
-            job_id,
-            src_files,
-            per_file_block_ids,
-            self.tensors,
-            self.gpu_blocks_per_file,
-        )
+        return storage_offload.transfer_async_get(job_id, src_files,
+                                                  per_file_block_ids,
+                                                  self.tensors)
 
     def get_finished(self) -> list[TransferResult]:
         """
@@ -242,6 +238,8 @@ class StorageOffloadingHandlers:
             staging_buffer_size_mb=self.buffer_size_mb,
             max_staging_memory_gb=self.max_staging_memory_gb,
             tp_rank=self.tp_rank,
+            gpu_blocks_per_file=self.gpu_blocks_per_file,
+            tensors=self.tensors,
             kv_before_blocks=kv_cache_layout.kv_before_num_blocks[0],
             layers_before_blocks=kv_cache_layout.layers_before_num_blocks[0],
             num_blocks_dimension=kv_cache_layout.num_blocks_idx[0],
@@ -277,8 +275,8 @@ class StorageOffloadingHandlers:
     # Shared path helpers
     # ----------------------------
     @staticmethod
-    def get_kv_cache_base_path(model_name, tp_size, tp_rank, dtype,
-                               root_dir: str) -> Path:
+    def get_kv_cache_base_path(model_name: str, tp_size: int, tp_rank: int,
+                               dtype: torch.dtype, root_dir: str) -> Path:
         """
         Build the KV-cache base path:
         <root_dir>/<model_name>/tp_<tp_size>/rank_<tp_rank>/<dtype>.
@@ -318,12 +316,8 @@ class StorageOffloadingHandlers:
         full_path = base_path / subfolder1 / subfolder2 / f"{block_hash_hex}.bin"
         return full_path
 
-    def compute_buffer_size_mb(self,
-                               tensors,
-                               gpu_blocks_per_file,
-                               num_blocks_idx,
-                               min_mb=32,
-                               max_mb=None):
+    def compute_buffer_size_mb(self, tensors: list[torch.Tensor],
+                               gpu_blocks_per_file: int, num_blocks_idx: int):
         """
         Estimate staging memory size in MB, applying min/max limits.
 
@@ -331,8 +325,6 @@ class StorageOffloadingHandlers:
             tensors: List of KV-cache tensors used to infer per-block memory usage.
             gpu_blocks_per_file: Number of GPU blocks grouped into a single file.
             num_blocks_idx: Index of the num_blocks dimension in the tensor layout.
-            min_mb: Minimum buffer size in megabytes.
-            max_mb: Optional maximum buffer size in megabytes.
 
         Returns:
             Estimated staging buffer size in megabytes.
@@ -349,10 +341,6 @@ class StorageOffloadingHandlers:
             tensors)  # multiply by number of tensors
         total_bytes = total_elems * ref.element_size()
         mb = math.ceil(total_bytes / (1024 * 1024))
-        if min_mb:
-            mb = max(mb, min_mb)
-        if max_mb:
-            mb = min(mb, max_mb)
         return mb
 
     def __del__(self):

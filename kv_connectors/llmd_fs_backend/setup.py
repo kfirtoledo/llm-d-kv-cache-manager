@@ -24,9 +24,11 @@ setup(
                       sources=[
                           "src/csrc/storage/storage_offload.cu",
                           "src/csrc/storage/numa_utils.cpp",
+                          "src/csrc/storage/cfg.cpp",
                           "src/csrc/storage/file_io.cpp",
                           "src/csrc/storage/thread_pool.cpp",
                           "src/csrc/storage/tensor_copy.cu",
+                          "src/csrc/storage/tensor_copy_kernels.cu",
                       ],
                       libraries=['numa', 'cuda'],
                       extra_compile_args={
