@@ -10,6 +10,28 @@
 #include <torch/extension.h>
 #include <cstddef>
 #include <cstdint>
+#include <ostream>
+
+// Layout mode enum - defines common layout configurations
+enum class LayoutMode : uint8_t {
+    DefaultKVFirst,     // kv_before_blocks=true,  layers_before_blocks=true
+    DefaultBlockFirst,  // kv_before_blocks=false, layers_before_blocks=true
+    CrossLayer  // layers_before_blocks=false (kv_before_blocks must be false)
+};
+
+inline std::ostream& operator<<(std::ostream& os, LayoutMode m) {
+    switch (m) {
+        case LayoutMode::DefaultKVFirst:
+            return os << "DefaultKVFirst";
+        case LayoutMode::DefaultBlockFirst:
+            return os << "DefaultBlockFirst";
+        case LayoutMode::CrossLayer:
+            return os << "CrossLayer";
+        default:
+            return os << "Unknown";
+    }
+}
+
 // Encapsulates KV cache layout and dimensions
 class CacheLayout {
    public:
@@ -27,11 +49,8 @@ class CacheLayout {
     int num_blocks_dimension;
     // Reference tensor for layout info
     int num_layers;
-
-    // True if {k,v} dimension is before num_blocks_dimension
-    bool kv_before_blocks;
-    // True if layer dimension is before num_blocks_dimension
-    bool layers_before_blocks;
+    // Cache layout mode
+    LayoutMode mode;
 
     CacheLayout(std::vector<torch::Tensor>& tensors,
                 int num_blocks_dimension,

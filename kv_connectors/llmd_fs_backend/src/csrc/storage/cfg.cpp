@@ -12,9 +12,7 @@ CacheLayout::CacheLayout(std::vector<torch::Tensor>& tensors,
                          int num_blocks_dimension,
                          bool kv_before_blocks,
                          bool layers_before_blocks)
-    : num_blocks_dimension(num_blocks_dimension),
-      kv_before_blocks(kv_before_blocks),
-      layers_before_blocks(layers_before_blocks) {
+    : num_blocks_dimension(num_blocks_dimension) {
     const auto& ref = tensors[0];
     num_blocks = ref.size(num_blocks_dimension);
     elem_size = ref.element_size();
@@ -25,12 +23,18 @@ CacheLayout::CacheLayout(std::vector<torch::Tensor>& tensors,
 
     num_layers = static_cast<int>(tensors.size());
     dtype = torch::Dtype(ref.scalar_type());
+
+    // Derive mode and validate combinations
+    mode = !layers_before_blocks
+               ? LayoutMode::CrossLayer
+               : (kv_before_blocks ? LayoutMode::DefaultKVFirst
+                                   : LayoutMode::DefaultBlockFirst);
+
     std::cout << "[INFO] CacheLayout: num_blocks=" << num_blocks
               << ", bytes_per_block=" << bytes_per_block
               << ", elem_size=" << elem_size
               << ", kv_bytes_per_plane=" << kv_bytes_per_plane
-              << ", kv_before_blocks=" << kv_before_blocks
-              << ", layers_before_blocks=" << layers_before_blocks << std::endl;
+              << ", mode=" << mode << std::endl;
 }
 
 // ------------------------------------------------------------

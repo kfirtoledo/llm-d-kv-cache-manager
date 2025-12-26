@@ -22,76 +22,75 @@ void copy_via_cuda_memcpy(uint8_t* cpu_base,
                           const ConnectorConfig& cfg) {
     cudaMemcpyKind kind =
         is_put ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+
+    uint8_t* gpu_base = reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
     // Direct pointer arithmetic - no indexing operations
     for (size_t bi = 0; bi < block_ids_list.size(); ++bi) {
         int64_t gpu_block_idx = block_ids_list[bi];
+        // Compute block offset
+        uint8_t* cpu_block_offset =
+            cpu_base + (gpu_block_idx % cfg.gpu_blocks_per_file) *
+                           gpu_tensors.size() * cfg.layout.bytes_per_block;
 
-        // Compute CPU buffer offset for this block
-        size_t cpu_block_offset = (gpu_block_idx % cfg.gpu_blocks_per_file) *
-                                  gpu_tensors.size() *
-                                  cfg.layout.bytes_per_block;
-        if (cfg.layout.layers_before_blocks) {  // Standard layout
-            size_t plane = cfg.layout.kv_bytes_per_plane;
-            size_t block_offset = gpu_block_idx * cfg.layout.bytes_per_block;
-            size_t k_off = static_cast<size_t>(gpu_block_idx) * plane;
-            size_t v_off =
-                (static_cast<size_t>(gpu_block_idx) + cfg.layout.num_blocks) *
-                plane;
-            for (size_t layer = 0; layer < gpu_tensors.size(); ++layer) {
-                uint8_t* gpu_base =
-                    reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
-                size_t cpu_layer_offset =
-                    cpu_block_offset + layer * cfg.layout.bytes_per_block;
-                if (cfg.layout.kv_before_blocks) {
-                    // Compute GPU and CPU offsets for K
-                    void* src_K = is_put ? (gpu_base + k_off)
-                                         : (cpu_base + cpu_layer_offset);
-                    void* dst_K = is_put ? (cpu_base + cpu_layer_offset)
-                                         : (gpu_base + k_off);
+        // 1) Cross-layer: single memcpy for the whole block (all layers packed)
+        if (cfg.layout.mode == LayoutMode::CrossLayer) {
+            uint8_t* gpu_block_offset =
+                gpu_base + gpu_block_idx * cfg.layout.bytes_per_block;
+            const void* src = is_put ? gpu_block_offset : cpu_block_offset;
+            void* dst = is_put ? cpu_block_offset : gpu_block_offset;
+            cudaError_t err = cudaMemcpyAsync(dst,
+                                              src,
+                                              cfg.layout.bytes_per_block,
+                                              kind,
+                                              stream.stream());
+            TORCH_CHECK(err == cudaSuccess, "cudaMemcpyAsync failed");
+            continue;
+        }
 
-                    cudaError_t err1 = cudaMemcpyAsync(dst_K,
-                                                       src_K,
-                                                       plane,
-                                                       kind,
-                                                       stream.stream());
-                    TORCH_CHECK(err1 == cudaSuccess,
-                                "cudaMemcpyAsync failed (K)");
+        // Otherwise, it's one of the per-layer layouts
+        for (size_t layer = 0; layer < gpu_tensors.size(); ++layer) {
+            uint8_t* gpu_layer_offset =
+                reinterpret_cast<uint8_t*>(gpu_tensors[layer].data_ptr());
+            uint8_t* cpu_layer_offset =
+                cpu_block_offset + layer * cfg.layout.bytes_per_block;
 
-                    // Compute GPU and CPU offsets for V
-                    void* src_V = is_put
-                                      ? (gpu_base + v_off)
-                                      : (cpu_base + cpu_layer_offset + plane);
-                    void* dst_V = is_put ? (cpu_base + cpu_layer_offset + plane)
-                                         : (gpu_base + v_off);
-                    cudaError_t err2 = cudaMemcpyAsync(dst_V,
-                                                       src_V,
-                                                       plane,
-                                                       kind,
-                                                       stream.stream());
-                    TORCH_CHECK(err2 == cudaSuccess,
-                                "cudaMemcpyAsync failed (V)");
-                } else {  // One copy for both K and V
-                    void* src = is_put ? (gpu_base + block_offset)
-                                       : (cpu_base + cpu_layer_offset);
-                    void* dst = is_put ? (cpu_base + cpu_layer_offset)
-                                       : (gpu_base + block_offset);
-                    cudaError_t err =
-                        cudaMemcpyAsync(dst,
-                                        src,
-                                        cfg.layout.bytes_per_block,
-                                        kind,
-                                        stream.stream());
-                    TORCH_CHECK(err == cudaSuccess, "cudaMemcpyAsync failed");
-                }
+            // 2) KV-first: two plane copies (K then V)
+            if (cfg.layout.mode == LayoutMode::DefaultKVFirst) {
+                size_t plane = cfg.layout.kv_bytes_per_plane;
+
+                size_t k_off = static_cast<size_t>(gpu_block_idx) * plane;
+                size_t v_off = (static_cast<size_t>(gpu_block_idx) +
+                                cfg.layout.num_blocks) *
+                               plane;
+
+                // Compute GPU and CPU offsets for K
+                void* src_K =
+                    is_put ? (gpu_layer_offset + k_off) : (cpu_layer_offset);
+                void* dst_K =
+                    is_put ? (cpu_layer_offset) : (gpu_layer_offset + k_off);
+
+                cudaError_t err1 =
+                    cudaMemcpyAsync(dst_K, src_K, plane, kind, stream.stream());
+                TORCH_CHECK(err1 == cudaSuccess, "cudaMemcpyAsync failed (K)");
+
+                // Compute GPU and CPU offsets for V
+                void* src_V = is_put ? (gpu_layer_offset + v_off)
+                                     : (cpu_layer_offset + plane);
+                void* dst_V = is_put ? (cpu_layer_offset + plane)
+                                     : (gpu_layer_offset + v_off);
+                cudaError_t err2 =
+                    cudaMemcpyAsync(dst_V, src_V, plane, kind, stream.stream());
+                TORCH_CHECK(err2 == cudaSuccess, "cudaMemcpyAsync failed (V)");
+                continue;
             }
-        } else {  // Cross-layer layout- one copy for all layers
-            uint8_t* gpu_base =
-                reinterpret_cast<uint8_t*>(gpu_tensors[0].data_ptr());
-            size_t gpu_offset = gpu_block_idx * cfg.layout.bytes_per_block;
-            uint8_t* cpu_ptr = cpu_base + cpu_block_offset;
 
-            const void* src = is_put ? (gpu_base + gpu_offset) : cpu_ptr;
-            void* dst = is_put ? cpu_ptr : (gpu_base + gpu_offset);
+            // 3) Block-first: one copy for K+V together
+            TORCH_CHECK(cfg.layout.mode == LayoutMode::DefaultBlockFirst,
+                        "Unexpected layout mode");
+            uint8_t* gpu_block_offset =
+                gpu_layer_offset + gpu_block_idx * cfg.layout.bytes_per_block;
+            void* src = is_put ? (gpu_block_offset) : (cpu_layer_offset);
+            void* dst = is_put ? (cpu_layer_offset) : (gpu_block_offset);
             cudaError_t err = cudaMemcpyAsync(dst,
                                               src,
                                               cfg.layout.bytes_per_block,
