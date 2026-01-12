@@ -17,6 +17,7 @@ from collections.abc import Iterator
 import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
@@ -37,8 +38,8 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
     OffloadingSpec for shared storage backend (e.g., mounted NFS, PVC).
     """
 
-    def __init__(self, vllm_config: VllmConfig):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        super().__init__(vllm_config, kv_cache_config)
 
         self._manager: OffloadingManager | None = None
         # worker-side

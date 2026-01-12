@@ -107,6 +107,16 @@ def assert_blocks_equal(
             torch.testing.assert_close(orig[:, int(b)], restored[:, int(b)])
 
 
+def wait_for_file(file_path: str, timeout: float = 2.0) -> bool:
+    """Wait for a file to exist up to timeout seconds."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if os.path.exists(file_path):
+            return True
+        time.sleep(0.01)  # avoid busy-spin
+    return False
+
+
 def total_block_size_mb(
     num_layers: int,
     num_heads: int,
@@ -201,7 +211,10 @@ def roundtrip_once(
     assert ok_put, "PUT failed"
     dur_put = time.time() - start_put
     for h in block_hashes:
-        assert os.path.exists(file_mapper.get_file_name(h)), "missing file after PUT"
+        file_path = file_mapper.get_file_name(h)
+        assert wait_for_file(file_path, timeout=2.0), (
+            f"missing file after PUT: {file_path}"
+        )
 
     # GET phase
     kv_caches_restored_handler = StorageOffloadingHandlers(

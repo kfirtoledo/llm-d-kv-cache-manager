@@ -185,14 +185,6 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
           bool is_store = true;
           bool success = false;
 
-          // Mark task completion on scope exit
-          ScopeGuard completion([&]() {
-            job_state->completed_tasks.fetch_add(1);
-            // if (!success) job_state->all_success = false; // TODO- silent
-            // ignore read failures for now offloading connector not able to
-            // handle failures
-          });
-
           // Execute the copy operation
           try {
             // Stage 1: copy tensors from GPU to staging CPU tensor.
@@ -201,11 +193,15 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
                 m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
                 "file: ",
                 dst_file);
-
             cudaError_t err = cudaStreamSynchronize(tls_stream.stream());
+            job_state->completed_tasks.fetch_add(1);
+
             if (err != cudaSuccess) {
               std::cerr << "[ERROR] cudaStreamSynchronize failed: "
                         << cudaGetErrorString(err) << std::endl;
+              // job_state->all_success = false; // TODO- silent
+              // ignore read failures for now offloading connector not able to
+              // handle failures
               return false;
             }
             // Stage 2: Write the cpu tensor to disk.
