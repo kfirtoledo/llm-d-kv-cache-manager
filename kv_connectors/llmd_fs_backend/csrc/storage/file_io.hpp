@@ -17,8 +17,12 @@
 #pragma once
 
 #include <string>
+#include <vector>
+#include <cuda_runtime.h>
 #include <torch/extension.h>
+
 #include "storage_types.hpp"
+#include "tensor_copier.hpp"
 
 // Write a buffer to disk using a temporary file and atomic rename
 bool write_buffer_to_file(const StagingBufferInfo& buf,
@@ -29,3 +33,19 @@ bool read_buffer_from_file(const std::string& path, StagingBufferInfo& buf);
 
 // update_atime update only the atime of a file without changing mtime
 void update_atime(const std::string& path);
+
+// Write via CPU staging - wraps copy_blocks + write_buffer_to_file
+// This is the original logic from storage_offload.cpp
+bool write_via_cpu_staged(TensorCopier& tensor_copier,
+                          const std::vector<int64_t>& block_ids,
+                          StagingBufferInfo& buf,
+                          cudaStream_t stream,
+                          const std::string& dst_file);
+
+// Read via CPU staging - wraps read_buffer_from_file + copy_blocks
+// This is the original logic from storage_offload.cpp
+bool read_via_cpu_staged(TensorCopier& tensor_copier,
+                         const std::vector<int64_t>& block_ids,
+                         StagingBufferInfo& buf,
+                         cudaStream_t stream,
+                         const std::string& src_file);

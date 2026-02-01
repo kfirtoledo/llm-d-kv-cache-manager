@@ -29,6 +29,10 @@ class TensorCopier {
                    const std::vector<int64_t>& block_ids_list,
                    bool is_store);
 
+  // Accessor methods for GDS direct access
+  const std::vector<torch::Tensor>& get_tensors() const { return m_gpu_tensors; }
+  size_t get_block_size() const { return m_tensor_block_size; }
+
  private:
   // GPU tensor list
   std::vector<torch::Tensor> m_gpu_tensors;

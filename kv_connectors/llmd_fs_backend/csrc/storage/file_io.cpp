@@ -21,8 +21,11 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <cuda_runtime.h>
 #include <random>
 
+#include "tensor_copier.hpp"
+#include "debug_utils.hpp"
 #include "file_io.hpp"
 #include "thread_pool.hpp"
 #include "logger.hpp"
@@ -144,4 +147,82 @@ void update_atime(const std::string& path) {
   times[1].tv_nsec = UTIME_NOW;   // update atime to now
   times[0].tv_nsec = UTIME_OMIT;  // keep mtime unchanged
   utimensat(AT_FDCWD, path.c_str(), times, 0);
+}
+
+// Write via CPU staging - wraps copy_blocks + write_buffer_to_file
+// This is the original logic from storage_offload.cpp
+bool write_via_cpu_staged(TensorCopier& tensor_copier,
+                          const std::vector<int64_t>& block_ids,
+                          StagingBufferInfo& buf,
+                          cudaStream_t stream,
+                          const std::string& dst_file) {
+  auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
+  bool is_store = true;
+
+  // Stage 1: copy tensors from GPU to staging CPU tensor
+  TIME_EXPR("write phase 1: copy_blocks ",
+            tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
+            "file: ",
+            dst_file);
+
+  cudaError_t err = cudaStreamSynchronize(stream);
+  if (err != cudaSuccess) {
+    std::cerr << "[ERROR] write_via_cpu_staged: cudaStreamSynchronize failed: "
+              << cudaGetErrorString(err) << std::endl;
+    return false;
+  }
+
+  // Stage 2: Write the cpu tensor to disk
+  bool success = TIME_EXPR("write phase 2: write_buffer_to_file",
+                           write_buffer_to_file(buf, dst_file),
+                           "file:",
+                           dst_file,
+                           " size:",
+                           buf.size);
+
+  if (!success) {
+    std::cerr
+        << "[ERROR] write_via_cpu_staged: Store failed during file write: "
+        << dst_file << "\n";
+  }
+
+  return success;
+}
+
+// Read via CPU staging - wraps read_buffer_from_file + copy_blocks
+// This is the original logic from storage_offload.cpp
+bool read_via_cpu_staged(TensorCopier& tensor_copier,
+                         const std::vector<int64_t>& block_ids,
+                         StagingBufferInfo& buf,
+                         cudaStream_t stream,
+                         const std::string& src_file) {
+  // Stage 1: Read file to staging CPU tensor
+  bool success = TIME_EXPR("read phase 1: read_buffer_from_file",
+                           read_buffer_from_file(src_file, buf),
+                           "file:",
+                           src_file);
+  if (!success) {
+    std::cerr
+        << "[ERROR] read_via_cpu_staged: read_buffer_from_file failed for "
+        << src_file << std::endl;
+    return false;
+  }
+
+  // Stage 2: copy tensors from staging CPU tensor to GPU
+  auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
+  bool is_store = false;
+
+  success = TIME_EXPR("read phase 2: copy_cpu_tensor_to_gpu_tensors",
+                      tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
+                      "file: ",
+                      src_file);
+
+  cudaError_t err = cudaStreamSynchronize(stream);
+  if (err != cudaSuccess) {
+    std::cerr << "[ERROR] read_via_cpu_staged: cudaStreamSynchronize failed: "
+              << cudaGetErrorString(err) << std::endl;
+    return false;
+  }
+
+  return success;
 }

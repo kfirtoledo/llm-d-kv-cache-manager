@@ -21,3 +21,9 @@ struct StagingBufferInfo {
   void* ptr = nullptr;
   size_t size = 0;
 };
+
+// Storage mode for file I/O operations
+enum class StorageMode {
+  CPU_BUFFER_STAGE,  // GPU → CPU buffer → File (traditional)
+  GDS_DIRECT         // GPU → File direct (GPUDirect Storage)
+};

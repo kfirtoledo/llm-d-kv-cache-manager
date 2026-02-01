@@ -29,6 +29,7 @@
 
 #include "thread_pool.hpp"
 #include "tensor_copier.hpp"
+#include "gds_file_io.hpp"
 
 // Tracks progress and results for a multi-file async PUT/GET job
 struct JobState {
@@ -53,6 +54,12 @@ class StorageOffloadEngine {
   ThreadPool m_thread_pool;
   // Handles GPU <-> CPU tensor copy operations
   TensorCopier m_tensor_copier;
+  // GDS file I/O handler (supports both GDS and CPU staging modes)
+  std::unique_ptr<GdsFileIO> m_gds_io;
+  // GPU blocks per file (needed for GDS operations)
+  int m_gpu_blocks_per_file;
+  // Storage mode (GDS_DIRECT or CPU_BUFFER_STAGE)
+  StorageMode m_storage_mode;
   // Calculate staging buffer size in bytes
   static size_t calc_staging_bytes(int gpu_blocks_per_file,
                                    const std::vector<torch::Tensor>& tensors);
@@ -63,7 +70,8 @@ class StorageOffloadEngine {
   // Initialize IO threads, CUDA streams, and staging memory pool
   StorageOffloadEngine(int io_threads,
                        int gpu_blocks_per_file,
-                       std::vector<torch::Tensor>& tensors);
+                       std::vector<torch::Tensor>& tensors,
+                       bool enable_gds);
   // Return finished jobs and their success status
   std::vector<std::pair<int, bool>> get_finished();
   // Wait for all tasks in the specified job to complete
