@@ -49,16 +49,47 @@
 #include "numa_utils.hpp"
 #include "thread_pool.hpp"
 #include "debug_utils.hpp"
+#include "gds_file_io.hpp"
 #include "tensor_copier.hpp"
 
 // Initialize IO threads, CUDA streams, and staging memory pool
 StorageOffloadEngine::StorageOffloadEngine(int io_threads,
                                            int gpu_blocks_per_file,
-                                           std::vector<torch::Tensor>& tensors)
+                                           std::vector<torch::Tensor>& tensors,
+                                           bool enable_gds)
     : m_tensor_copier(tensors, gpu_blocks_per_file),
       m_thread_pool(io_threads,
                     calc_staging_bytes(gpu_blocks_per_file, tensors),
-                    get_device_id()) {}
+                    get_device_id()),
+      m_gpu_blocks_per_file(gpu_blocks_per_file) {
+  // Initialize GDS if enabled
+  if (enable_gds) {
+    // Prepare to register GPU buffer list for GDS registration
+    std::vector<std::pair<void*, size_t>> gpu_buffers;
+    for (const auto& tensor : tensors) {
+      gpu_buffers.emplace_back(tensor.data_ptr(),
+                               tensor.numel() * tensor.element_size());
+    }
+
+    // Create GDS with GPU buffers for automatic registration
+    m_gds_io = std::make_unique<GdsFileIO>(true, gpu_buffers);
+
+    // Set storage mode based on whether GDS initialized successfully
+    if (m_gds_io->is_gds_available()) {
+      m_storage_mode = StorageMode::GDS_DIRECT;
+      std::cout << "[INFO] StorageOffloadEngine: Using GDS_DIRECT mode\n";
+    } else {
+      m_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+      std::cout << "[INFO] StorageOffloadEngine: GDS initialization failed, "
+                   "falling back to CPU_BUFFER_STAGE mode\n";
+    }
+
+  } else {
+    m_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+    std::cout << "[INFO] StorageOffloadEngine: GDS disabled, using "
+                 "CPU_BUFFER_STAGE mode\n";
+  }
+}
 
 // Get current device (should be set by vLLM before calling this)
 int StorageOffloadEngine::get_device_id() {
@@ -182,39 +213,58 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
 
           StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
           auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
-          bool is_store = true;
           bool success = false;
 
-          // Execute the copy operation
+          // Execute the write operation based on storage mode
           try {
-            // Stage 1: copy tensors from GPU to staging CPU tensor.
-            TIME_EXPR(
-                "write phase 1: copy_blocks ",
-                m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
-                "file: ",
-                dst_file);
-            cudaError_t err = cudaStreamSynchronize(tls_stream.stream());
-            job_state->completed_tasks.fetch_add(1);
-
-            if (err != cudaSuccess) {
-              std::cerr << "[ERROR] cudaStreamSynchronize failed: "
-                        << cudaGetErrorString(err) << std::endl;
-              // job_state->all_success = false; // TODO- silent
-              // ignore read failures for now offloading connector not able to
-              // handle failures
-              return false;
-            }
-            // Stage 2: Write the cpu tensor to disk.
-            success = TIME_EXPR("write phase 2: write_buffer_to_file",
-                                write_buffer_to_file(buf, dst_file),
+            switch (m_storage_mode) {
+              case StorageMode::GDS_DIRECT:
+                // Try GDS direct write
+                if (m_gds_io) {
+                  success =
+                      TIME_EXPR("write: write_gds_direct",
+                                m_gds_io->write_gds_direct(dst_file,
+                                                           cpu_base,
+                                                           buf.size,
+                                                           0,
+                                                           tls_stream.stream()),
                                 "file:",
                                 dst_file,
                                 " size:",
                                 buf.size);
-            if (!success) {
-              std::cerr << "[ERROR] Store failed during file write: "
-                        << dst_file << "\n";
-              return success;
+
+                  if (success) {
+                    job_state->completed_tasks.fetch_add(1);
+                    return true;
+                  }
+
+                  // GDS failed, log warning and fall through to CPU staging
+                  std::cerr << "[WARN] GDS write failed for " << dst_file
+                            << ", falling back to CPU staging\n";
+                }
+                // Fall through to CPU staging
+                [[fallthrough]];
+
+              case StorageMode::CPU_BUFFER_STAGE:
+                // CPU buffer staging mode
+                success = TIME_EXPR("write: write_via_cpu_staged",
+                                    write_via_cpu_staged(m_tensor_copier,
+                                                         block_ids,
+                                                         buf,
+                                                         tls_stream.stream(),
+                                                         dst_file),
+                                    "file:",
+                                    dst_file,
+                                    " size:",
+                                    buf.size);
+                job_state->completed_tasks.fetch_add(1);
+
+                if (!success) {
+                  std::cerr
+                      << "[ERROR] Store failed during file write: " << dst_file
+                      << "\n";
+                }
+                return success;
             }
           } catch (const std::exception& e) {
             std::cerr << "[ERROR] Store failed for " << dst_file << ": "
@@ -254,6 +304,8 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
     auto future =
         m_thread_pool.enqueue([this, src_file, block_ids, job_state]() -> bool {
           StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
+          auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
+          auto& tls_stream = ThreadPool::get_tls_stream();
           bool success = false;
 
           ScopeGuard completion([&]() {
@@ -263,35 +315,52 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
             // handle failures
           });
 
+          // Execute the read operation based on storage mode
           try {
-            // Stage 1: Read file to staging CPU tensor.
-            // Read data from disk into a tensor.
-            success = TIME_EXPR("read phase 1: read_buffer_from_file",
-                                read_buffer_from_file(src_file, buf),
+            switch (m_storage_mode) {
+              case StorageMode::GDS_DIRECT:
+                // Try GDS direct read
+                if (m_gds_io) {
+                  success =
+                      TIME_EXPR("read: read_gds_direct",
+                                m_gds_io->read_gds_direct(src_file,
+                                                          cpu_base,
+                                                          buf.size,
+                                                          0,
+                                                          tls_stream.stream()),
                                 "file:",
-                                src_file);
-            if (!success) {
-              std::cerr << "[ERROR] Stage1 read_buffer_from_file failed for "
-                        << src_file << std::endl;
-              return success;
-            }
-            // Stage 2:  copy tensors from staging CPU tensor to GPU.
-            // Perform asynchronous GPU copy and tensor swap.
-            auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
-            bool is_store = false;
-            // Execute the copy operation
-            success = TIME_EXPR(
-                "read phase 2: copy_cpu_tensor_to_gpu_tensors",
-                m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
-                "file: ",
-                src_file);
+                                src_file,
+                                " size:",
+                                buf.size);
 
-            auto& tls_stream = ThreadPool::get_tls_stream();
-            cudaError_t err = cudaStreamSynchronize(tls_stream.stream());
-            if (err != cudaSuccess) {
-              std::cerr << "[ERROR] cudaStreamSynchronize failed: "
-                        << cudaGetErrorString(err) << std::endl;
-              return false;
+                  if (success) {
+                    return true;
+                  }
+
+                  // GDS failed, log warning and fall through to CPU staging
+                  std::cerr << "[WARN] GDS read failed for " << src_file
+                            << ", falling back to CPU staging\n";
+                }
+                // Fall through to CPU staging
+                [[fallthrough]];
+
+              case StorageMode::CPU_BUFFER_STAGE:
+                // CPU buffer staging mode
+                success = TIME_EXPR("read: read_via_cpu_staged",
+                                    read_via_cpu_staged(m_tensor_copier,
+                                                        block_ids,
+                                                        buf,
+                                                        tls_stream.stream(),
+                                                        src_file),
+                                    "file:",
+                                    src_file,
+                                    " size:",
+                                    buf.size);
+
+                if (!success) {
+                  std::cerr << "[ERROR] Load failed for " << src_file << "\n";
+                }
+                return success;
             }
           } catch (const std::exception& e) {
             std::cerr << "[ERROR] Load failed for " << src_file << ": "
