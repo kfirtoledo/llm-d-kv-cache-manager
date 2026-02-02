@@ -1,0 +1,41 @@
+ARG CUDA_VERSION=12.9.1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS build
+
+# Build arguments
+ARG DEBIAN_FRONTEND=noninteractive
+ARG max_jobs=16
+ARG torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX'
+
+# Install dependencies
+RUN apt-get update && \
+    apt-get install -y software-properties-common curl git && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.12 python3.12-dev build-essential ninja-build libnuma-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install pip for Python 3.12
+RUN curl -sSL https://bootstrap.pypa.io/get-pip.py | python3.12
+
+# Set Python 3.12 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+
+# Install Python build dependencies
+RUN pip install --upgrade pip setuptools wheel ninja numpy torch==2.9.1
+
+# Set CUDA environment
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+ENV MAX_JOBS=${max_jobs}
+
+# Copy source code
+WORKDIR /workspace
+COPY . /workspace/
+
+# Build wheel
+RUN rm -rf build dist *.egg-info wheels && \
+    mkdir -p dist && \
+    python setup.py bdist_wheel -d dist
