@@ -158,7 +158,7 @@ class TestGDSAvailability:
         print(f"\n[INFO] CUDA devices available: {torch.cuda.device_count()}")
         print(f"[INFO] Current CUDA device: {torch.cuda.current_device()}")
 
-    def test_gds_roundtrip(self):
+    def test_gds_roundtrip(self,default_vllm_config):
         """Test a full roundtrip with GDS enabled."""
         gds_available = check_gds_available()
         if not gds_available:
@@ -182,7 +182,7 @@ class TestGDSAvailability:
 
         # Setup file mapper
         file_mapper = FileMapper(
-            root_dir="/tmp/gds-test-roundtrip",
+            root_dir="/ibm/fs1-remote/kfir/gds/",
             model_name="test-model",
             gpu_block_size=block_size,
             gpu_blocks_per_file=gpu_blocks_per_file,

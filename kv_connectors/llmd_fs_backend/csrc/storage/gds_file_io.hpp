@@ -105,12 +105,28 @@ class GdsFileIO {
                         off_t file_offset,
                         cudaStream_t stream);
 
+  // GDS write with GPU buffer offset
+  bool write_gds_direct_with_offset(const std::string& file_path,
+                                     void* gpu_base_ptr,
+                                     off_t gpu_offset,
+                                     size_t size,
+                                     off_t file_offset,
+                                     cudaStream_t stream);
+
   // GDS read implementation
   bool read_gds_direct(const std::string& file_path,
                        void* gpu_ptr,
                        size_t size,
                        off_t file_offset,
                        cudaStream_t stream);
+
+  // GDS read with GPU buffer offset
+  bool read_gds_direct_with_offset(const std::string& file_path,
+                                    void* gpu_base_ptr,
+                                    off_t gpu_offset,
+                                    size_t size,
+                                    off_t file_offset,
+                                    cudaStream_t stream);
 
  private:
   // GDS initialization state

@@ -234,20 +234,21 @@ bool GdsFileIO::write_gds_direct(const std::string& file_path,
 
   // Perform async GPU→File write via DMA (bypasses CPU entirely)
   ssize_t bytes_written = 0;
+  off_t devPtr_offset = 0;  // GPU buffer offset (always 0 since gpu_ptr already points to the right location)
   status =
       cuFileWriteAsync(handle,        // cuFile handle
                        gpu_ptr,       // Source: GPU memory (must be registered)
                        &size,         // Bytes to write
                        &file_offset,  // File offset
-                       &file_offset,  // GPU buffer offset (same as file offset)
+                       &devPtr_offset,  // GPU buffer offset (0 since gpu_ptr is already positioned)
                        &bytes_written,  // Output: bytes written
                        stream           // CUDA stream for async operation
       );
 
   bool write_success = true;
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr << "[ERROR] GdsFileIO: cuFileWriteAsync failed: " << status.err
-              << "\n";
+    std::cerr << "[ERROR] GdsFileIO: cuFileWriteAsync failed with cuFile error: "
+              << status.err << " (bytes_written=" << bytes_written << ")\n";
     write_success = false;
   } else {
     cudaError_t cuda_err =
@@ -266,6 +267,87 @@ bool GdsFileIO::write_gds_direct(const std::string& file_path,
 
   cuFileHandleDeregister(handle);  // Deregister cuFile handle
   close(fd);                       // Close file descriptor
+
+  return write_success;
+#else
+  return false;
+#endif
+}
+
+// GDS write with GPU buffer offset - uses O_RDWR to allow multiple writes
+bool GdsFileIO::write_gds_direct_with_offset(const std::string& file_path,
+                                              void* gpu_base_ptr,
+                                              off_t gpu_offset,
+                                              size_t size,
+                                              off_t file_offset,
+                                              cudaStream_t stream) {
+#ifdef USE_CUFILE
+  // Create parent directory if needed
+  fs::path path(file_path);
+  fs::path parent_dir = path.parent_path();
+  try {
+    fs::create_directories(parent_dir);
+  } catch (const fs::filesystem_error& e) {
+    std::cerr << "[ERROR] GdsFileIO: Failed to create directories: " << e.what()
+              << "\n";
+    return false;
+  }
+
+  // Open file with O_RDWR and O_DIRECT for GDS
+  std::cout << "[DEBUG] GDS write_with_offset: Opening file " << file_path << "\n";
+  int fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644);
+  if (fd < 0) {
+    std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
+              << std::strerror(errno) << " (errno=" << errno << ")\n";
+    return false;
+  }
+  std::cout << "[DEBUG] GDS write_with_offset: File opened successfully, fd=" << fd << "\n";
+
+  // Register file descriptor with cuFile driver for DMA setup
+  CUfileDescr_t descr;
+  memset(&descr, 0, sizeof(CUfileDescr_t));
+  descr.handle.fd = fd;
+  descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+  CUfileHandle_t handle;
+  CUfileError_t status = cuFileHandleRegister(&handle, &descr);
+  if (status.err != CU_FILE_SUCCESS) {
+    std::cerr
+        << "[ERROR] GdsFileIO: cuFileHandleRegister failed with error code: "
+        << status.err << "\n";
+    close(fd);
+    return false;
+  }
+  std::cout << "[DEBUG] GDS write_with_offset: File handle registered\n";
+
+  // Try synchronous write first for better error reporting
+  std::cout << "[DEBUG] GDS write_with_offset: Calling cuFileWrite (synchronous)\n"
+            << "  gpu_base_ptr=" << gpu_base_ptr << "\n"
+            << "  gpu_offset=" << gpu_offset << "\n"
+            << "  size=" << size << "\n"
+            << "  file_offset=" << file_offset << "\n";
+  
+  // Calculate actual GPU pointer (base + offset)
+  void* actual_gpu_ptr = static_cast<uint8_t*>(gpu_base_ptr) + gpu_offset;
+  
+  ssize_t bytes_written = cuFileWrite(handle, actual_gpu_ptr, size, file_offset, 0);
+  
+  std::cout << "[DEBUG] GDS write_with_offset: cuFileWrite returned\n"
+            << "  bytes_written=" << bytes_written << "\n";
+
+  bool write_success = true;
+  if (bytes_written < 0) {
+    std::cerr << "[ERROR] GdsFileIO: cuFileWrite failed with error: "
+              << bytes_written << "\n";
+    write_success = false;
+  } else if (bytes_written != static_cast<ssize_t>(size)) {
+    std::cerr << "[ERROR] GdsFileIO: Incomplete write: " << bytes_written
+              << " / " << size << " bytes\n";
+    write_success = false;
+  }
+
+  cuFileHandleDeregister(handle);
+  close(fd);
 
   return write_success;
 #else
@@ -306,20 +388,21 @@ bool GdsFileIO::read_gds_direct(const std::string& file_path,
 
   // Perform async File→GPU read via DMA (bypasses CPU entirely)
   ssize_t bytes_read = 0;
+  off_t devPtr_offset = 0;  // GPU buffer offset (always 0 since gpu_ptr already points to the right location)
   status =
       cuFileReadAsync(handle,   // cuFile handle
                       gpu_ptr,  // Destination: GPU memory (must be registered)
                       &size,    // Bytes to read
                       &file_offset,  // File offset
-                      &file_offset,  // GPU buffer offset (same as file offset)
+                      &devPtr_offset,  // GPU buffer offset (0 since gpu_ptr is already positioned)
                       &bytes_read,   // Output: bytes read
                       stream         // CUDA stream for async operation
       );
 
   bool read_success = true;
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr << "[ERROR] GdsFileIO: cuFileReadAsync failed: " << status.err
-              << "\n";
+    std::cerr << "[ERROR] GdsFileIO: cuFileReadAsync failed with cuFile error: "
+              << status.err << " (bytes_read=" << bytes_read << ")\n";
     read_success = false;
   } else {
     cudaError_t cuda_err =
@@ -338,6 +421,77 @@ bool GdsFileIO::read_gds_direct(const std::string& file_path,
 
   cuFileHandleDeregister(handle);  // Deregister cuFile handle
   close(fd);                       // Close file descriptor
+
+  return read_success;
+#else
+  return false;
+#endif
+}
+
+
+// GDS read with GPU buffer offset
+bool GdsFileIO::read_gds_direct_with_offset(const std::string& file_path,
+                                             void* gpu_base_ptr,
+                                             off_t gpu_offset,
+                                             size_t size,
+                                             off_t file_offset,
+                                             cudaStream_t stream) {
+#ifdef USE_CUFILE
+  // Open file with O_DIRECT for GDS
+  std::cout << "[DEBUG] GDS read_with_offset: Opening file " << file_path << "\n";
+  int fd = open(file_path.c_str(), O_RDONLY | O_DIRECT);
+  if (fd < 0) {
+    std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
+              << std::strerror(errno) << " (errno=" << errno << ")\n";
+    return false;
+  }
+  std::cout << "[DEBUG] GDS read_with_offset: File opened successfully, fd=" << fd << "\n";
+
+  // Register file descriptor with cuFile driver
+  CUfileDescr_t descr;
+  memset(&descr, 0, sizeof(CUfileDescr_t));
+  descr.handle.fd = fd;
+  descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+  CUfileHandle_t handle;
+  CUfileError_t status = cuFileHandleRegister(&handle, &descr);
+  if (status.err != CU_FILE_SUCCESS) {
+    std::cerr
+        << "[ERROR] GdsFileIO: cuFileHandleRegister failed with error code: "
+        << status.err << "\n";
+    close(fd);
+    return false;
+  }
+  std::cout << "[DEBUG] GDS read_with_offset: File handle registered\n";
+
+  // Use synchronous read for better compatibility
+  std::cout << "[DEBUG] GDS read_with_offset: Calling cuFileRead (synchronous)\n"
+            << "  gpu_base_ptr=" << gpu_base_ptr << "\n"
+            << "  gpu_offset=" << gpu_offset << "\n"
+            << "  size=" << size << "\n"
+            << "  file_offset=" << file_offset << "\n";
+  
+  // Calculate actual GPU pointer (base + offset)
+  void* actual_gpu_ptr = static_cast<uint8_t*>(gpu_base_ptr) + gpu_offset;
+  
+  ssize_t bytes_read = cuFileRead(handle, actual_gpu_ptr, size, file_offset, 0);
+  
+  std::cout << "[DEBUG] GDS read_with_offset: cuFileRead returned\n"
+            << "  bytes_read=" << bytes_read << "\n";
+
+  bool read_success = true;
+  if (bytes_read < 0) {
+    std::cerr << "[ERROR] GdsFileIO: cuFileRead failed with error: "
+              << bytes_read << "\n";
+    read_success = false;
+  } else if (bytes_read != static_cast<ssize_t>(size)) {
+    std::cerr << "[ERROR] GdsFileIO: Incomplete read: " << bytes_read << " / "
+              << size << " bytes\n";
+    read_success = false;
+  }
+
+  cuFileHandleDeregister(handle);
+  close(fd);
 
   return read_success;
 #else

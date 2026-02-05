@@ -219,19 +219,36 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
           try {
             switch (m_storage_mode) {
               case StorageMode::GDS_DIRECT:
-                // Try GDS direct write
+                // GDS direct write - write directly from GPU memory to file
                 if (m_gds_io) {
-                  success =
-                      TIME_EXPR("write: write_gds_direct",
-                                m_gds_io->write_gds_direct(dst_file,
-                                                           cpu_base,
-                                                           buf.size,
-                                                           0,
-                                                           tls_stream.stream()),
-                                "file:",
-                                dst_file,
-                                " size:",
-                                buf.size);
+                  // For GDS, write each layer's blocks directly from GPU memory
+                  success = true;
+                  off_t file_offset = 0;
+                  
+                  for (size_t bi = 0; bi < block_ids.size() && success; ++bi) {
+                    int64_t gpu_block_idx = block_ids[bi];
+                    
+                    for (const auto& tensor : m_tensor_copier.get_tensors()) {
+                      // Use registered base pointer and calculate offset
+                      void* gpu_base_ptr = tensor.data_ptr();
+                      off_t gpu_offset = gpu_block_idx * m_tensor_copier.get_block_size();
+                      
+                      bool write_ok = m_gds_io->write_gds_direct_with_offset(
+                          dst_file,
+                          gpu_base_ptr,
+                          gpu_offset,
+                          m_tensor_copier.get_block_size(),
+                          file_offset,
+                          tls_stream.stream());
+                      
+                      if (!write_ok) {
+                        success = false;
+                        break;
+                      }
+                      
+                      file_offset += m_tensor_copier.get_block_size();
+                    }
+                  }
 
                   if (success) {
                     job_state->completed_tasks.fetch_add(1);
@@ -319,19 +336,35 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
           try {
             switch (m_storage_mode) {
               case StorageMode::GDS_DIRECT:
-                // Try GDS direct read
+                // GDS direct read - read directly from file to GPU memory
                 if (m_gds_io) {
-                  success =
-                      TIME_EXPR("read: read_gds_direct",
-                                m_gds_io->read_gds_direct(src_file,
-                                                          cpu_base,
-                                                          buf.size,
-                                                          0,
-                                                          tls_stream.stream()),
-                                "file:",
-                                src_file,
-                                " size:",
-                                buf.size);
+                  success = true;
+                  off_t file_offset = 0;
+                  
+                  for (size_t bi = 0; bi < block_ids.size() && success; ++bi) {
+                    int64_t gpu_block_idx = block_ids[bi];
+                    
+                    for (const auto& tensor : m_tensor_copier.get_tensors()) {
+                      // Use registered base pointer and calculate offset
+                      void* gpu_base_ptr = tensor.data_ptr();
+                      off_t gpu_offset = gpu_block_idx * m_tensor_copier.get_block_size();
+                      
+                      bool read_ok = m_gds_io->read_gds_direct_with_offset(
+                          src_file,
+                          gpu_base_ptr,
+                          gpu_offset,
+                          m_tensor_copier.get_block_size(),
+                          file_offset,
+                          tls_stream.stream());
+                      
+                      if (!read_ok) {
+                        success = false;
+                        break;
+                      }
+                      
+                      file_offset += m_tensor_copier.get_block_size();
+                    }
+                  }
 
                   if (success) {
                     return true;
