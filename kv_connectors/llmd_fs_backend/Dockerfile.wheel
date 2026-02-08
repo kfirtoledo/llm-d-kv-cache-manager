@@ -42,15 +42,9 @@ ENV MAX_JOBS=${max_jobs}
 RUN python -m pip install --upgrade pip setuptools wheel ninja numpy
 
 # Install torch.
-# On ARM64, CUDA-enabled torch wheels are often not on the default PyPI index.
-# Choose ONE of the following blocks:
-
-# (A) If PyTorch provides cu129 wheels for your platform:
 RUN python -m pip install --index-url https://download.pytorch.org/whl/cu129 torch==2.9.1
 
-# (B) If you decide to build against CUDA 12.8 instead, change CUDA_VERSION above
-#     and use cu128 here:
-# RUN python -m pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.1
+
 
 # Copy source code
 WORKDIR /workspace
