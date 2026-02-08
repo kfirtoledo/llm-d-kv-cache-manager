@@ -311,7 +311,7 @@ def test_fs_backend_roundtrip_param(
         pp_size=tp_size,
         pcp_size=tp_size,
         rank=tp_rank,
-        dtype=dtype,
+        dtype=str(dtype),
     )
     roundtrip_once(
         file_mapper=file_mapper,

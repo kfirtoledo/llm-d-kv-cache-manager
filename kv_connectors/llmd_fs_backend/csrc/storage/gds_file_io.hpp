@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <torch/extension.h>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -127,6 +128,34 @@ class GdsFileIO {
                                     size_t size,
                                     off_t file_offset,
                                     cudaStream_t stream);
+
+  // OPTIMIZED: Write multiple blocks to a file in a single file-open session
+  // Opens file once, writes all blocks sequentially, then closes
+  // Parameters:
+  //   file_path: path to the file to write
+  //   tensors: vector of GPU tensors (one per layer)
+  //   block_ids: vector of block indices to write
+  //   block_size: size of each block in bytes
+  //   stream: CUDA stream for async operations
+  bool write_blocks_to_file(const std::string& file_path,
+                            const std::vector<torch::Tensor>& tensors,
+                            const std::vector<int64_t>& block_ids,
+                            size_t block_size,
+                            cudaStream_t stream);
+
+  // OPTIMIZED: Read multiple blocks from a file in a single file-open session
+  // Opens file once, reads all blocks sequentially, then closes
+  // Parameters:
+  //   file_path: path to the file to read
+  //   tensors: vector of GPU tensors (one per layer)
+  //   block_ids: vector of block indices to read
+  //   block_size: size of each block in bytes
+  //   stream: CUDA stream for async operations
+  bool read_blocks_from_file(const std::string& file_path,
+                             const std::vector<torch::Tensor>& tensors,
+                             const std::vector<int64_t>& block_ids,
+                             size_t block_size,
+                             cudaStream_t stream);
 
  private:
   // GDS initialization state

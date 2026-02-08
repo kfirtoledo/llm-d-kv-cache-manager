@@ -18,6 +18,7 @@
 #include "file_io.hpp"
 #include "debug_utils.hpp"
 
+#include <torch/extension.h>
 #include <iostream>
 #include <cstring>
 #include <fcntl.h>
@@ -498,3 +499,181 @@ bool GdsFileIO::read_gds_direct_with_offset(const std::string& file_path,
   return false;
 #endif
 }
+
+
+// OPTIMIZED: Write multiple blocks to a file in a single file-open session
+// Opens file once, writes all blocks sequentially, then closes
+bool GdsFileIO::write_blocks_to_file(const std::string& file_path,
+                                     const std::vector<torch::Tensor>& tensors,
+                                     const std::vector<int64_t>& block_ids,
+                                     size_t block_size,
+                                     cudaStream_t stream) {
+#ifdef USE_CUFILE
+  // Create parent directory if needed
+  fs::path path(file_path);
+  fs::path parent_dir = path.parent_path();
+  try {
+    fs::create_directories(parent_dir);
+  } catch (const fs::filesystem_error& e) {
+    std::cerr << "[ERROR] GdsFileIO: Failed to create directories: " << e.what()
+              << "\n";
+    return false;
+  }
+
+  // Open file once with O_RDWR and O_DIRECT for GDS
+  std::cout << "[DEBUG] GDS write_blocks_to_file: Opening file " << file_path 
+            << " for " << block_ids.size() << " blocks\n";
+  int fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644);
+  if (fd < 0) {
+    std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
+              << std::strerror(errno) << " (errno=" << errno << ")\n";
+    return false;
+  }
+
+  // Register file descriptor with cuFile driver for DMA setup
+  CUfileDescr_t descr;
+  memset(&descr, 0, sizeof(CUfileDescr_t));
+  descr.handle.fd = fd;
+  descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+  CUfileHandle_t handle;
+  CUfileError_t status = cuFileHandleRegister(&handle, &descr);
+  if (status.err != CU_FILE_SUCCESS) {
+    std::cerr
+        << "[ERROR] GdsFileIO: cuFileHandleRegister failed with error code: "
+        << status.err << "\n";
+    close(fd);
+    return false;
+  }
+
+  // Write all blocks sequentially
+  bool success = true;
+  off_t file_offset = 0;
+
+  for (size_t bi = 0; bi < block_ids.size() && success; ++bi) {
+    int64_t gpu_block_idx = block_ids[bi];
+
+    for (const auto& tensor : tensors) {
+      // Calculate GPU pointer (base + offset)
+      void* gpu_base_ptr = tensor.data_ptr();
+      void* actual_gpu_ptr = static_cast<uint8_t*>(gpu_base_ptr) + 
+                             (gpu_block_idx * block_size);
+
+      // Write this block's data for this layer
+      ssize_t bytes_written = cuFileWrite(handle, actual_gpu_ptr, block_size, 
+                                          file_offset, 0);
+
+      if (bytes_written < 0) {
+        std::cerr << "[ERROR] GdsFileIO: cuFileWrite failed with error: "
+                  << bytes_written << " at file_offset=" << file_offset << "\n";
+        success = false;
+        break;
+      } else if (bytes_written != static_cast<ssize_t>(block_size)) {
+        std::cerr << "[ERROR] GdsFileIO: Incomplete write: " << bytes_written
+                  << " / " << block_size << " bytes at file_offset=" 
+                  << file_offset << "\n";
+        success = false;
+        break;
+      }
+
+      file_offset += block_size;
+    }
+  }
+
+  cuFileHandleDeregister(handle);
+  close(fd);
+
+  if (success) {
+    std::cout << "[DEBUG] GDS write_blocks_to_file: Successfully wrote " 
+              << block_ids.size() << " blocks to " << file_path << "\n";
+  }
+
+  return success;
+#else
+  return false;
+#endif
+}
+
+// OPTIMIZED: Read multiple blocks from a file in a single file-open session
+// Opens file once, reads all blocks sequentially, then closes
+bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
+                                      const std::vector<torch::Tensor>& tensors,
+                                      const std::vector<int64_t>& block_ids,
+                                      size_t block_size,
+                                      cudaStream_t stream) {
+#ifdef USE_CUFILE
+  // Open file once with O_DIRECT for GDS
+  std::cout << "[DEBUG] GDS read_blocks_from_file: Opening file " << file_path 
+            << " for " << block_ids.size() << " blocks\n";
+  int fd = open(file_path.c_str(), O_RDONLY | O_DIRECT);
+  if (fd < 0) {
+    std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
+              << std::strerror(errno) << " (errno=" << errno << ")\n";
+    return false;
+  }
+
+  // Register file descriptor with cuFile driver
+  CUfileDescr_t descr;
+  memset(&descr, 0, sizeof(CUfileDescr_t));
+  descr.handle.fd = fd;
+  descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+  CUfileHandle_t handle;
+  CUfileError_t status = cuFileHandleRegister(&handle, &descr);
+  if (status.err != CU_FILE_SUCCESS) {
+    std::cerr
+        << "[ERROR] GdsFileIO: cuFileHandleRegister failed with error code: "
+        << status.err << "\n";
+    close(fd);
+    return false;
+  }
+
+  // Read all blocks sequentially
+  bool success = true;
+  off_t file_offset = 0;
+
+  for (size_t bi = 0; bi < block_ids.size() && success; ++bi) {
+    int64_t gpu_block_idx = block_ids[bi];
+
+    for (const auto& tensor : tensors) {
+      // Calculate GPU pointer (base + offset)
+      void* gpu_base_ptr = tensor.data_ptr();
+      void* actual_gpu_ptr = static_cast<uint8_t*>(gpu_base_ptr) + 
+                             (gpu_block_idx * block_size);
+
+      // Read this block's data for this layer
+      ssize_t bytes_read = cuFileRead(handle, actual_gpu_ptr, block_size, 
+                                      file_offset, 0);
+
+      if (bytes_read < 0) {
+        std::cerr << "[ERROR] GdsFileIO: cuFileRead failed with error: "
+                  << bytes_read << " at file_offset=" << file_offset << "\n";
+        success = false;
+        break;
+      } else if (bytes_read != static_cast<ssize_t>(block_size)) {
+        std::cerr << "[ERROR] GdsFileIO: Incomplete read: " << bytes_read
+                  << " / " << block_size << " bytes at file_offset=" 
+                  << file_offset << "\n";
+        success = false;
+        break;
+      }
+
+      file_offset += block_size;
+    }
+  }
+
+  cuFileHandleDeregister(handle);
+  close(fd);
+
+  if (success) {
+    std::cout << "[DEBUG] GDS read_blocks_from_file: Successfully read " 
+              << block_ids.size() << " blocks from " << file_path << "\n";
+  }
+
+  return success;
+#else
+  return false;
+#endif
+}
+
+// Made with Bob
