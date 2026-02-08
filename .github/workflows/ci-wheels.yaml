@@ -1,13 +1,15 @@
 name: CI - Build CUDA Wheels
 
 on:
-  pull_request:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write 
 
 jobs:
-  cuda-wheels:
+  build-wheels:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -56,3 +58,22 @@ jobs:
         with:
           name: cuda-wheels-${{ matrix.arch }}
           path: kv_connectors/llmd_fs_backend/wheels/*.whl
+
+  attach-assets:
+    needs: build-wheels
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_wheels
+
+      - name: Attach wheels to the tag release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: release_wheels/**/*.whl
+          fail_on_unmatched_files: true
+          draft: true
+          prerelease: true
