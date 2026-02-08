@@ -58,76 +58,10 @@ class GdsFileIO {
   // Static capability check - can be called before construction
   static bool is_gds_supported();
 
-  // Write buffer to file
-  // - GDS mode: Direct GPU → File
-  // - CPU mode: GPU → CPU buffer → File (calls existing write_buffer_to_file)
-  // Parameters:
-  //   file_path: path to the file to write
-  //   gpu_ptr: pointer to GPU memory
-  //   size: number of bytes to write
-  //   file_offset: offset in the file to start writing
-  //   stream: CUDA stream for async operations
-  //   cpu_buffer: staging buffer (only used in CPU mode, can be nullptr in GDS
-  //   mode)
-  bool write_to_file_gds(const std::string& file_path,
-                         void* gpu_ptr,
-                         size_t size,
-                         off_t file_offset,
-                         cudaStream_t stream,
-                         const StagingBufferInfo* cpu_buffer = nullptr);
-
-  // Read file to buffer
-  // - GDS mode: File → GPU direct
-  // - CPU mode: File → CPU buffer → GPU (calls existing read_buffer_from_file)
-  // Parameters:
-  //   file_path: path to the file to read
-  //   gpu_ptr: pointer to GPU memory
-  //   size: number of bytes to read
-  //   file_offset: offset in the file to start reading
-  //   stream: CUDA stream for async operations
-  //   cpu_buffer: staging buffer (only used in CPU mode, can be nullptr in GDS
-  //   mode)
-  bool read_file_to_gds(const std::string& file_path,
-                        void* gpu_ptr,
-                        size_t size,
-                        off_t file_offset,
-                        cudaStream_t stream,
-                        StagingBufferInfo* cpu_buffer = nullptr);
-
   // Register GPU buffer for GDS (optional, improves performance)
   // Only effective in GDS mode
   // Note: Buffers are automatically deregistered in destructor
   bool register_gpu_buffer(void* gpu_ptr, size_t size);
-
-  // GDS write implementation
-  bool write_gds_direct(const std::string& file_path,
-                        void* gpu_ptr,
-                        size_t size,
-                        off_t file_offset,
-                        cudaStream_t stream);
-
-  // GDS write with GPU buffer offset
-  bool write_gds_direct_with_offset(const std::string& file_path,
-                                     void* gpu_base_ptr,
-                                     off_t gpu_offset,
-                                     size_t size,
-                                     off_t file_offset,
-                                     cudaStream_t stream);
-
-  // GDS read implementation
-  bool read_gds_direct(const std::string& file_path,
-                       void* gpu_ptr,
-                       size_t size,
-                       off_t file_offset,
-                       cudaStream_t stream);
-
-  // GDS read with GPU buffer offset
-  bool read_gds_direct_with_offset(const std::string& file_path,
-                                    void* gpu_base_ptr,
-                                    off_t gpu_offset,
-                                    size_t size,
-                                    off_t file_offset,
-                                    cudaStream_t stream);
 
   // OPTIMIZED: Write multiple blocks to a file in a single file-open session
   // Opens file once, writes all blocks sequentially, then closes
