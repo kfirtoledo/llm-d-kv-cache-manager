@@ -1,13 +1,15 @@
 name: CI - Build CUDA Wheels
 
 on:
-  pull_request:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write 
 
 jobs:
-  cuda-wheels:
+  build-wheels:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,11 +44,11 @@ jobs:
             --progress plain \
             -f Dockerfile.wheel .
 
-          mkdir -p wheels
-          docker run --rm -v $(pwd)/wheels:/artifacts_host llmd-fs-backend:build-${{ matrix.arch }} \
-            bash -lc 'cp -r dist/* /artifacts_host/ && chmod -R a+rw /artifacts_host'
+          mkdir -p wheel-release
+          docker run --rm -v "$(pwd)/wheel-release:/artifacts_host" llmd-fs-backend:build-${{ matrix.arch }} \
+            bash -lc 'cp -v dist/*.whl /artifacts_host/ && chmod -R a+rw /artifacts_host'
 
-          ls -lh wheels/
+          ls -lh wheel-release/
 
       # -----------------------
       # Upload artifacts
@@ -55,4 +57,23 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cuda-wheels-${{ matrix.arch }}
-          path: kv_connectors/llmd_fs_backend/wheels/*.whl
+          path: kv_connectors/llmd_fs_backend/wheel-release/*.whl
+
+  attach-assets:
+    needs: build-wheels
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_wheels
+
+      - name: Attach wheels to the tag release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: release_wheels/**/*.whl
+          fail_on_unmatched_files: true
+          draft: true
+          prerelease: true
