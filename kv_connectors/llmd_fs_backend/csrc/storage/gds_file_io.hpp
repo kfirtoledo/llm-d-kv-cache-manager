@@ -19,7 +19,6 @@
 #include <torch/extension.h>
 #include <string>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -44,10 +43,8 @@ typedef struct CUfileDescr_st {
 class GdsFileIO {
  public:
   // Constructor - initializes and detects GDS support
-  // enable_gds: whether to attempt GDS initialization
   // gpu_buffers: optional list of GPU buffers to pre-register
-  GdsFileIO(bool enable_gds = true,
-            const std::vector<std::pair<void*, size_t>>& gpu_buffers = {});
+  GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers = {});
 
   // Destructor - cleanup resources
   ~GdsFileIO();
@@ -83,9 +80,6 @@ class GdsFileIO {
   // GDS initialization state
   bool m_gds_initialized;
 
-  // Mutex for thread-safe operations (only used during buffer registration)
-  mutable std::mutex m_mutex;
-
   // Registered GPU buffers (for GDS mode)
   std::unordered_map<void*, size_t> m_registered_buffers;
 
@@ -93,4 +87,3 @@ class GdsFileIO {
   bool initialize_gds();
 };
 
-// Made with Bob

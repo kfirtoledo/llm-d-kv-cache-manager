@@ -29,36 +29,25 @@
 namespace fs = std::filesystem;
 
 // Constructor
-GdsFileIO::GdsFileIO(bool enable_gds,
-                     const std::vector<std::pair<void*, size_t>>& gpu_buffers)
+GdsFileIO::GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers)
     : m_gds_initialized(false) {
-  if (enable_gds && is_gds_supported()) {
-    if (initialize_gds()) {
-      std::cout << "[INFO] GdsFileIO: GPUDirect Storage (GDS) enabled\n";
-
-      // Register GPU buffers if provided
-      if (!gpu_buffers.empty()) {
-        std::cout << "[INFO] GdsFileIO: Registering " << gpu_buffers.size()
-                  << " GPU buffers for GDS\n";
-        for (const auto& [ptr, size] : gpu_buffers) {
-          if (!register_gpu_buffer(ptr, size)) {
-            std::cerr << "[WARN] GdsFileIO: Failed to register buffer " << ptr
-                      << "\n";
-          }
-        }
+  if (!is_gds_supported()) {
+    std::cout << "[INFO] GdsFileIO: GDS not supported, using CPU buffer staging\n";
+    return;
+  }  
+  
+  if (initialize_gds()) {
+    std::cout << "[INFO] GdsFileIO: GPUDirect Storage (GDS) enabled\n";
+    
+    // Register GPU buffers
+    for (const auto& [ptr, size] : gpu_buffers) {
+      if (!register_gpu_buffer(ptr, size)) {
+        std::cerr << "[WARN] GdsFileIO: Failed to register buffer " << ptr << "\n";
       }
-    } else {
-      std::cerr << "[WARN] GdsFileIO: GDS initialization failed, using CPU "
-                   "buffer staging\n";
     }
   } else {
-    if (!enable_gds) {
-      std::cout << "[INFO] GdsFileIO: GDS disabled by configuration, using CPU "
-                   "buffer staging\n";
-    } else {
-      std::cout
-          << "[INFO] GdsFileIO: GDS not supported, using CPU buffer staging\n";
-    }
+    std::cerr << "[WARN] GdsFileIO: GDS initialization failed, using CPU "
+                 "buffer staging\n";
   }
 }
 
@@ -158,30 +147,22 @@ bool GdsFileIO::initialize_gds() {
 // Register GPU buffer with cuFile for optimized DMA transfers
 bool GdsFileIO::register_gpu_buffer(void* gpu_ptr, size_t size) {
 #ifdef USE_CUFILE
-  if (!m_gds_initialized) {  // Ensure driver is initialized first
+  if (!m_gds_initialized) {
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(
-      m_mutex);  // Thread-safe registration (only used during construction)
-
-  if (m_registered_buffers.find(gpu_ptr) !=
-      m_registered_buffers.end()) {  // Skip if already registered
-    return true;
+  if (m_registered_buffers.find(gpu_ptr) != m_registered_buffers.end()) {
+    return true;  // Skip if already registered
   }
 
-  CUfileError_t status =
-      cuFileBufRegister(gpu_ptr,
-                        size,
-                        0);  // Register GPU memory region with cuFile driver
+  CUfileError_t status = cuFileBufRegister(gpu_ptr, size, 0);
   if (status.err != CU_FILE_SUCCESS) {
     std::cerr << "[WARN] GdsFileIO: cuFileBufRegister failed with error code: "
               << status.err << "\n";
     return false;
   }
 
-  m_registered_buffers[gpu_ptr] =
-      size;  // Track registered buffer for cleanup in destructor
+  m_registered_buffers[gpu_ptr] = size;
   return true;
 #else
   return false;
@@ -209,8 +190,6 @@ bool GdsFileIO::write_blocks_to_file(const std::string& file_path,
   }
 
   // Open file once with O_RDWR and O_DIRECT for GDS
-  // std::cout << "[DEBUG] GDS write_blocks_to_file: Opening file " << file_path 
-  //           << " for " << block_ids.size() << " blocks\n";
   int fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644);
   if (fd < 0) {
     std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
@@ -221,9 +200,10 @@ bool GdsFileIO::write_blocks_to_file(const std::string& file_path,
   // Register file descriptor with cuFile driver for DMA setup
   CUfileDescr_t descr;
   memset(&descr, 0, sizeof(CUfileDescr_t));
+  /// Configure the descriptor with our file descriptor
   descr.handle.fd = fd;
   descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
+  /// register the file with cuFile driver
   CUfileHandle_t handle;
   CUfileError_t status = cuFileHandleRegister(&handle, &descr);
   if (status.err != CU_FILE_SUCCESS) {
@@ -285,9 +265,6 @@ bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
                                       size_t block_size,
                                       cudaStream_t stream) {
 #ifdef USE_CUFILE
-  // Open file once with O_DIRECT for GDS
-  // std::cout << "[DEBUG] GDS read_blocks_from_file: Opening file " << file_path 
-  //           << " for " << block_ids.size() << " blocks\n";
   int fd = open(file_path.c_str(), O_RDONLY | O_DIRECT);
   if (fd < 0) {
     std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
@@ -298,9 +275,10 @@ bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
   // Register file descriptor with cuFile driver
   CUfileDescr_t descr;
   memset(&descr, 0, sizeof(CUfileDescr_t));
+  /// Configure the descriptor with our file descriptor
   descr.handle.fd = fd;
   descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
+  // register the file with cuFile driver
   CUfileHandle_t handle;
   CUfileError_t status = cuFileHandleRegister(&handle, &descr);
   if (status.err != CU_FILE_SUCCESS) {

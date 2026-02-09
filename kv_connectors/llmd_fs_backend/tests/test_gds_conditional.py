@@ -251,5 +251,3 @@ if __name__ == "__main__":
 
     # Run pytest
     sys.exit(pytest.main([__file__, "-v", "-s"]))
-
-# Made with Bob

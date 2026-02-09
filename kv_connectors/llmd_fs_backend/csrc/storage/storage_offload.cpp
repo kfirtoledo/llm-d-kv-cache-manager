@@ -72,7 +72,7 @@ StorageOffloadEngine::StorageOffloadEngine(int io_threads,
     }
 
     // Create GDS with GPU buffers for automatic registration
-    m_gds_io = std::make_unique<GdsFileIO>(true, gpu_buffers);
+    m_gds_io = std::make_unique<GdsFileIO>(gpu_buffers);
 
     // Set storage mode based on whether GDS initialized successfully
     if (m_gds_io->is_gds_available()) {
@@ -221,12 +221,20 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
                 // GDS direct write - write directly from GPU memory to file
                 // OPTIMIZED: Open file once, write all blocks sequentially, then close
                 if (m_gds_io) {
-                  success = m_gds_io->write_blocks_to_file(
-                      dst_file,
-                      m_tensor_copier.get_tensors(),
-                      block_ids,
-                      m_tensor_copier.get_block_size(),
-                      tls_stream.stream());
+                  // Calculate total size for throughput measurement
+                  size_t total_size = block_ids.size() * m_tensor_copier.get_block_size();
+                  
+                  success = TIME_EXPR_THROUGHPUT(
+                      "write: GDS direct write",
+                      m_gds_io->write_blocks_to_file(
+                          dst_file,
+                          m_tensor_copier.get_tensors(),
+                          block_ids,
+                          m_tensor_copier.get_block_size(),
+                          tls_stream.stream()),
+                      total_size,
+                      "file:", dst_file,
+                      " blocks:", block_ids.size());
 
                   if (success) {
                     job_state->completed_tasks.fetch_add(1);
@@ -241,16 +249,16 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
                 [[fallthrough]];
               case StorageMode::CPU_BUFFER_STAGE:
                 // CPU buffer staging mode
-                success = TIME_EXPR("write: write_via_cpu_staged",
-                                    write_via_cpu_staged(m_tensor_copier,
-                                                         block_ids,
-                                                         buf,
-                                                         tls_stream.stream(),
-                                                         dst_file),
-                                    "file:",
-                                    dst_file,
-                                    " size:",
-                                    buf.size);
+                success = TIME_EXPR_THROUGHPUT(
+                    "write: write_via_cpu_staged",
+                    write_via_cpu_staged(m_tensor_copier,
+                                         block_ids,
+                                         buf,
+                                         tls_stream.stream(),
+                                         dst_file),
+                    buf.size,
+                    "file:", dst_file,
+                    " blocks:", block_ids.size());
                 job_state->completed_tasks.fetch_add(1);
 
                 if (!success) {
@@ -312,12 +320,20 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
                 // GDS direct read - read directly from file to GPU memory
                 // OPTIMIZED: Open file once, read all blocks sequentially, then close
                 if (m_gds_io) {
-                  success = m_gds_io->read_blocks_from_file(
-                      src_file,
-                      m_tensor_copier.get_tensors(),
-                      block_ids,
-                      m_tensor_copier.get_block_size(),
-                      tls_stream.stream());
+                  // Calculate total size for throughput measurement
+                  size_t total_size = block_ids.size() * m_tensor_copier.get_block_size();
+                  
+                  success = TIME_EXPR_THROUGHPUT(
+                      "read: GDS direct read",
+                      m_gds_io->read_blocks_from_file(
+                          src_file,
+                          m_tensor_copier.get_tensors(),
+                          block_ids,
+                          m_tensor_copier.get_block_size(),
+                          tls_stream.stream()),
+                      total_size,
+                      "file:", src_file,
+                      " blocks:", block_ids.size());
 
                   if (success) {
                     return true;
@@ -332,16 +348,16 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
 
               case StorageMode::CPU_BUFFER_STAGE:
                 // CPU buffer staging mode
-                success = TIME_EXPR("read: read_via_cpu_staged",
-                                    read_via_cpu_staged(m_tensor_copier,
-                                                        block_ids,
-                                                        buf,
-                                                        tls_stream.stream(),
-                                                        src_file),
-                                    "file:",
-                                    src_file,
-                                    " size:",
-                                    buf.size);
+                success = TIME_EXPR_THROUGHPUT(
+                    "read: read_via_cpu_staged",
+                    read_via_cpu_staged(m_tensor_copier,
+                                        block_ids,
+                                        buf,
+                                        tls_stream.stream(),
+                                        src_file),
+                    buf.size,
+                    "file:", src_file,
+                    " blocks:", block_ids.size());
 
                 if (!success) {
                   std::cerr << "[ERROR] Load failed for " << src_file << "\n";
