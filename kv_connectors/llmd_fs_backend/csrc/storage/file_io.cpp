@@ -25,7 +25,6 @@
 #include <random>
 
 #include "tensor_copier.hpp"
-#include "debug_utils.hpp"
 #include "file_io.hpp"
 #include "thread_pool.hpp"
 #include "logger.hpp"
@@ -167,8 +166,8 @@ bool write_via_cpu_staged(TensorCopier& tensor_copier,
 
   cudaError_t err = cudaStreamSynchronize(stream);
   if (err != cudaSuccess) {
-    std::cerr << "[ERROR] write_via_cpu_staged: cudaStreamSynchronize failed: "
-              << cudaGetErrorString(err) << std::endl;
+    FS_LOG_ERROR("write_via_cpu_staged: cudaStreamSynchronize failed: "
+                 << cudaGetErrorString(err));
     return false;
   }
 
@@ -181,9 +180,8 @@ bool write_via_cpu_staged(TensorCopier& tensor_copier,
                            buf.size);
 
   if (!success) {
-    std::cerr
-        << "[ERROR] write_via_cpu_staged: Store failed during file write: "
-        << dst_file << "\n";
+    FS_LOG_ERROR("write_via_cpu_staged: Store failed during file write: "
+                 << dst_file);
   }
 
   return success;
@@ -202,9 +200,8 @@ bool read_via_cpu_staged(TensorCopier& tensor_copier,
                            "file:",
                            src_file);
   if (!success) {
-    std::cerr
-        << "[ERROR] read_via_cpu_staged: read_buffer_from_file failed for "
-        << src_file << std::endl;
+    FS_LOG_ERROR("read_via_cpu_staged: read_buffer_from_file failed for "
+                 << src_file);
     return false;
   }
 
@@ -219,8 +216,8 @@ bool read_via_cpu_staged(TensorCopier& tensor_copier,
 
   cudaError_t err = cudaStreamSynchronize(stream);
   if (err != cudaSuccess) {
-    std::cerr << "[ERROR] read_via_cpu_staged: cudaStreamSynchronize failed: "
-              << cudaGetErrorString(err) << std::endl;
+    FS_LOG_ERROR("read_via_cpu_staged: cudaStreamSynchronize failed: "
+                 << cudaGetErrorString(err));
     return false;
   }
 

@@ -16,7 +16,7 @@
 
 #include "gds_file_io.hpp"
 #include "file_io.hpp"
-#include "debug_utils.hpp"
+#include "logger.hpp"
 
 #include <torch/extension.h>
 #include <iostream>
@@ -32,22 +32,22 @@ namespace fs = std::filesystem;
 GdsFileIO::GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers)
     : m_gds_initialized(false) {
   if (!is_gds_supported()) {
-    std::cout << "[INFO] GdsFileIO: GDS not supported, using CPU buffer staging\n";
+    FS_LOG_INFO("GdsFileIO: GDS not supported, using CPU buffer staging");
     return;
-  }  
+  }
   
   if (initialize_gds()) {
-    std::cout << "[INFO] GdsFileIO: GPUDirect Storage (GDS) enabled\n";
+    FS_LOG_INFO("GdsFileIO: GPUDirect Storage (GDS) enabled");
     
     // Register GPU buffers
     for (const auto& [ptr, size] : gpu_buffers) {
       if (!register_gpu_buffer(ptr, size)) {
-        std::cerr << "[WARN] GdsFileIO: Failed to register buffer " << ptr << "\n";
+        FS_LOG_WARN("GdsFileIO: Failed to register buffer " << ptr);
       }
     }
   } else {
-    std::cerr << "[WARN] GdsFileIO: GDS initialization failed, using CPU "
-                 "buffer staging\n";
+    FS_LOG_WARN("GdsFileIO: GDS initialization failed, using CPU "
+                "buffer staging");
   }
 }
 
@@ -67,8 +67,8 @@ GdsFileIO::~GdsFileIO() {
   // Close driver
   CUfileError_t status = cuFileDriverClose();
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr << "[WARN] GdsFileIO: cuFileDriverClose failed with error code: "
-              << status.err << "\n";
+    FS_LOG_WARN("GdsFileIO: cuFileDriverClose failed with error code: "
+                << status.err);
   }
 
   m_gds_initialized = false;
@@ -119,8 +119,8 @@ bool GdsFileIO::initialize_gds() {
                                               // be called once per process)
 
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr << "[ERROR] GdsFileIO: cuFileDriverOpen failed with error code: "
-              << status.err << "\n";
+    FS_LOG_ERROR("GdsFileIO: cuFileDriverOpen failed with error code: "
+                 << status.err);
     return false;
   }
 
@@ -130,12 +130,11 @@ bool GdsFileIO::initialize_gds() {
   CUfileDrvProps_t props;
   status = cuFileDriverGetProperties(&props);
   if (status.err == CU_FILE_SUCCESS) {
-    std::cout << "[INFO] GdsFileIO: cuFile driver properties:\n"
-              << "  - max_device_cache_size: " << props.max_device_cache_size
-              << "\n"  // Device cache limit
-              << "  - max_device_pinned_mem_size: "
-              << props.max_device_pinned_mem_size
-              << "\n";  // Pinned memory limit
+    FS_LOG_INFO("GdsFileIO: cuFile driver properties:\n"
+                << "  - max_device_cache_size: " << props.max_device_cache_size
+                << "\n"  // Device cache limit
+                << "  - max_device_pinned_mem_size: "
+                << props.max_device_pinned_mem_size);
   }
 
   return true;
@@ -157,8 +156,8 @@ bool GdsFileIO::register_gpu_buffer(void* gpu_ptr, size_t size) {
 
   CUfileError_t status = cuFileBufRegister(gpu_ptr, size, 0);
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr << "[WARN] GdsFileIO: cuFileBufRegister failed with error code: "
-              << status.err << "\n";
+    FS_LOG_WARN("GdsFileIO: cuFileBufRegister failed with error code: "
+                << status.err);
     return false;
   }
 
@@ -184,16 +183,15 @@ bool GdsFileIO::write_blocks_to_file(const std::string& file_path,
   try {
     fs::create_directories(parent_dir);
   } catch (const fs::filesystem_error& e) {
-    std::cerr << "[ERROR] GdsFileIO: Failed to create directories: " << e.what()
-              << "\n";
+    FS_LOG_ERROR("GdsFileIO: Failed to create directories: " << e.what());
     return false;
   }
 
   // Open file once with O_RDWR and O_DIRECT for GDS
   int fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644);
   if (fd < 0) {
-    std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
-              << std::strerror(errno) << " (errno=" << errno << ")\n";
+    FS_LOG_ERROR("GdsFileIO: Failed to open file " << file_path << ": "
+                 << std::strerror(errno) << " (errno=" << errno << ")");
     return false;
   }
 
@@ -207,9 +205,8 @@ bool GdsFileIO::write_blocks_to_file(const std::string& file_path,
   CUfileHandle_t handle;
   CUfileError_t status = cuFileHandleRegister(&handle, &descr);
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr
-        << "[ERROR] GdsFileIO: cuFileHandleRegister failed with error code: "
-        << status.err << "\n";
+    FS_LOG_ERROR("GdsFileIO: cuFileHandleRegister failed with error code: "
+                 << status.err);
     close(fd);
     return false;
   }
@@ -232,14 +229,14 @@ bool GdsFileIO::write_blocks_to_file(const std::string& file_path,
                                           file_offset, 0);
 
       if (bytes_written < 0) {
-        std::cerr << "[ERROR] GdsFileIO: cuFileWrite failed with error: "
-                  << bytes_written << " at file_offset=" << file_offset << "\n";
+        FS_LOG_ERROR("GdsFileIO: cuFileWrite failed with error: "
+                     << bytes_written << " at file_offset=" << file_offset);
         success = false;
         break;
       } else if (bytes_written != static_cast<ssize_t>(block_size)) {
-        std::cerr << "[ERROR] GdsFileIO: Incomplete write: " << bytes_written
-                  << " / " << block_size << " bytes at file_offset=" 
-                  << file_offset << "\n";
+        FS_LOG_ERROR("GdsFileIO: Incomplete write: " << bytes_written
+                     << " / " << block_size << " bytes at file_offset="
+                     << file_offset);
         success = false;
         break;
       }
@@ -267,8 +264,8 @@ bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
 #ifdef USE_CUFILE
   int fd = open(file_path.c_str(), O_RDONLY | O_DIRECT);
   if (fd < 0) {
-    std::cerr << "[ERROR] GdsFileIO: Failed to open file " << file_path << ": "
-              << std::strerror(errno) << " (errno=" << errno << ")\n";
+    FS_LOG_ERROR("GdsFileIO: Failed to open file " << file_path << ": "
+                 << std::strerror(errno) << " (errno=" << errno << ")");
     return false;
   }
 
@@ -282,9 +279,8 @@ bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
   CUfileHandle_t handle;
   CUfileError_t status = cuFileHandleRegister(&handle, &descr);
   if (status.err != CU_FILE_SUCCESS) {
-    std::cerr
-        << "[ERROR] GdsFileIO: cuFileHandleRegister failed with error code: "
-        << status.err << "\n";
+    FS_LOG_ERROR("GdsFileIO: cuFileHandleRegister failed with error code: "
+                 << status.err);
     close(fd);
     return false;
   }
@@ -307,14 +303,14 @@ bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
                                       file_offset, 0);
 
       if (bytes_read < 0) {
-        std::cerr << "[ERROR] GdsFileIO: cuFileRead failed with error: "
-                  << bytes_read << " at file_offset=" << file_offset << "\n";
+        FS_LOG_ERROR("GdsFileIO: cuFileRead failed with error: "
+                     << bytes_read << " at file_offset=" << file_offset);
         success = false;
         break;
       } else if (bytes_read != static_cast<ssize_t>(block_size)) {
-        std::cerr << "[ERROR] GdsFileIO: Incomplete read: " << bytes_read
-                  << " / " << block_size << " bytes at file_offset=" 
-                  << file_offset << "\n";
+        FS_LOG_ERROR("GdsFileIO: Incomplete read: " << bytes_read
+                     << " / " << block_size << " bytes at file_offset="
+                     << file_offset);
         success = false;
         break;
       }

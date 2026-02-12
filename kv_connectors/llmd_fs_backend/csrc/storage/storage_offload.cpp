@@ -77,17 +77,17 @@ StorageOffloadEngine::StorageOffloadEngine(int io_threads,
     // Set storage mode based on whether GDS initialized successfully
     if (m_gds_io->is_gds_available()) {
       m_storage_mode = StorageMode::GDS_DIRECT;
-      std::cout << "[INFO] StorageOffloadEngine: Using GDS_DIRECT mode\n";
+      FS_LOG_INFO("StorageOffloadEngine: Using GDS_DIRECT mode");
     } else {
       m_storage_mode = StorageMode::CPU_BUFFER_STAGE;
-      std::cout << "[INFO] StorageOffloadEngine: GDS initialization failed, "
-                   "falling back to CPU_BUFFER_STAGE mode\n";
+      FS_LOG_INFO("StorageOffloadEngine: GDS initialization failed, "
+                  "falling back to CPU_BUFFER_STAGE mode");
     }
 
   } else {
     m_storage_mode = StorageMode::CPU_BUFFER_STAGE;
-    std::cout << "[INFO] StorageOffloadEngine: GDS disabled, using "
-                 "CPU_BUFFER_STAGE mode\n";
+    FS_LOG_INFO("StorageOffloadEngine: GDS disabled, using "
+                "CPU_BUFFER_STAGE mode");
   }
 }
 
@@ -242,8 +242,8 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
                   }
 
                   // GDS failed, log warning and fall through to CPU staging
-                  std::cerr << "[WARN] GDS write failed for " << dst_file
-                            << ", falling back to CPU staging\n";
+                  FS_LOG_WARN("GDS write failed for " << dst_file
+                              << ", falling back to CPU staging");
                 }
                 // Fall through to CPU staging
                 [[fallthrough]];
@@ -263,6 +263,7 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
 
                 if (!success) {
                   FS_LOG_ERROR("Store failed during file write: " << dst_file);
+                }
                 return success;
             }
           } catch (const std::exception& e) {
@@ -340,8 +341,8 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
                   }
 
                   // GDS failed, log warning and fall through to CPU staging
-                  std::cerr << "[WARN] GDS read failed for " << src_file
-                            << ", falling back to CPU staging\n";
+                  FS_LOG_WARN("GDS read failed for " << src_file
+                              << ", falling back to CPU staging");
                 }
                 // Fall through to CPU staging
                 [[fallthrough]];
@@ -360,7 +361,7 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
                     " blocks:", block_ids.size());
 
                 if (!success) {
-                  std::cerr << "[ERROR] Load failed for " << src_file << "\n";
+                  FS_LOG_ERROR("Load failed for " << src_file);
                 }
                 return success;
             }

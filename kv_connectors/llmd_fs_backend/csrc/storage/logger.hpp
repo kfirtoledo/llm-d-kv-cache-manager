@@ -139,7 +139,7 @@ inline bool get_env_flag(const char* name, bool default_val) {
 // Usage: TIME_EXPR_THROUGHPUT(label, expr, size_bytes, additional_info...)
 #define TIME_EXPR_THROUGHPUT(label, expr, size_bytes, ...)              \
   ([&]() -> bool {                                                      \
-    if (FSLogger::level() > LogLevel::DEBUG) {                                   \
+    if (FSLogger::level() > LogLevel::DEBUG) {                          \
       return ((expr), true);                                            \
     }                                                                   \
     auto __t0 = std::chrono::high_resolution_clock::now();              \
@@ -158,12 +158,12 @@ inline bool get_env_flag(const char* name, bool default_val) {
     double __gb = static_cast<double>(size_bytes) / (1024.0 * 1024.0 * 1024.0); \
     double __throughput_gbps = (__seconds > 0) ? (__gb / __seconds) : 0.0; \
     std::ostringstream __oss;                                           \
-    __oss << "[DEBUG][TIME] " << label << " took " << __ms << " ms"     \
+    __oss << "[TIME] " << label << " took " << __ms << " ms"            \
           << " | size: " << __gb << " GB"                               \
           << " | throughput: " << __throughput_gbps << " GB/s";         \
     __VA_OPT__(__oss << " | "; [&]<typename... Args>(Args&&... args) {  \
       ((__oss << args), ...);                                           \
     }(__VA_ARGS__);)                                                    \
-    std::cout << __oss.str() << std::endl;                              \
+    FS_LOG_DEBUG(__oss.str());                                          \
     return __ret;                                                       \
   })()
