@@ -44,7 +44,9 @@ class GdsFileIO {
  public:
   // Constructor - initializes and detects GDS support
   // gpu_buffers: optional list of GPU buffers to pre-register
-  GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers = {});
+  // block_size: size of each block for per-block registration (0 = register entire buffer)
+  GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers = {},
+            size_t block_size = 0);
 
   // Destructor - cleanup resources
   ~GdsFileIO();
@@ -58,7 +60,8 @@ class GdsFileIO {
   // Register GPU buffer for GDS (optional, improves performance)
   // Only effective in GDS mode
   // Note: Buffers are automatically deregistered in destructor
-  bool register_gpu_buffer(void* gpu_ptr, size_t size);
+  // block_size: if > 0, register buffer in blocks of this size
+  bool register_gpu_buffer(void* gpu_ptr, size_t size, size_t block_size = 0);
 
   // Write multiple blocks to a file in a single file-open session
   // Opens file once, writes all blocks sequentially, then closes

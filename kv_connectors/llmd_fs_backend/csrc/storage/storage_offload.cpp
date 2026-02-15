@@ -71,8 +71,11 @@ StorageOffloadEngine::StorageOffloadEngine(int io_threads,
                                tensor.numel() * tensor.element_size());
     }
 
+    // Get block size from tensor copier for GDS registration
+    size_t block_size = m_tensor_copier.get_block_size();
+    
     // Create GDS with GPU buffers for automatic registration
-    m_gds_io = std::make_unique<GdsFileIO>(gpu_buffers);
+    m_gds_io = std::make_unique<GdsFileIO>(gpu_buffers, block_size);
 
     // Set storage mode based on whether GDS initialized successfully
     if (m_gds_io->is_gds_available()) {
