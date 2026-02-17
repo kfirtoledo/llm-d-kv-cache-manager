@@ -5,8 +5,7 @@
             "logging": {
                             // log directory, if not enabled will create log file under current working directory
                             //"dir": "/home/<xxxx>",
-                            //"dir": "/ibm/fs1-remote/cufile-log/lmcache-logs",
-
+                            //"dir": "/ibm/fs1-remote/cufile-log/css-host-191",
                             // NOTICE|ERROR|WARN|INFO|DEBUG|TRACE (in decreasing order of severity)
                             "level": "ERROR"
             },
@@ -40,8 +39,8 @@
                             // Note: ensure (max_device_cache_size_kb / per_buffer_cache_size_kb) >= io_batchsize
                             "per_buffer_cache_size_kb": 1024,
                             // limit on maximum device memory size (parameter should be 4K aligned) that can be pinned for a given process
-                            //"max_device_pinned_mem_size_kb":  83886080 33554432,
-                            "max_device_pinned_mem_size_kb" : 251658240, //83886080,
+                            //"max_device_pinned_mem_size_kb" : 33554432,
+                            "max_device_pinned_mem_size_kb" : 83886080,
                             // true or false (true will enable asynchronous io submission to nvidia-fs driver)
                             // Note : currently the overall IO will still be synchronous
                             "use_poll_mode" : false,
@@ -50,7 +49,7 @@
                             // allow p2pdma, this will enable use of cuFile without nvme patches 
                             "use_pci_p2pdma": false,
                             // allow compat mode, this will enable use of cuFile posix read/writes
-                            "allow_compat_mode": false,
+                            "allow_compat_mode": true,
                             // enable GDS write support for RDMA based storage
                             "gds_rdma_write_support": true,
                             // GDS batch size
@@ -60,7 +59,7 @@
                             "io_priority": "default",
                             // client-side rdma addr list for user-space file-systems(e.g ["10.0.1.0", "10.0.2.0"])
                             //"rdma_dev_addr_list": [ ],
-                            "rdma_dev_addr_list": ["10.10.3.190", "10.10.4.190", "10.10.5.190", "10.10.6.190", "10.10.7.190", "10.10.8.190", "10.10.9.190", "10.10.10.190", "10.10.11.190", "10.10.12.190", "10.10.13.190", "10.10.14.190", "10.10.15.190", "10.10.16.190", "10.10.17.190", "10.10.18.190"],
+			    "rdma_dev_addr_list": [ "10.10.3.191", "10.10.4.191", "10.10.5.191", "10.10.6.191", "10.10.7.191", "10.10.8.191", "10.10.9.191", "10.10.10.191", "10.10.11.191", "10.10.12.191", "10.10.13.191", "10.10.14.191", "10.10.15.191", "10.10.16.191", "10.10.17.191", "10.10.18.191" ],
                             // load balancing policy for RDMA memory registration(MR), (RoundRobin, RoundRobinMaxMin)
                             // In RoundRobin, MRs will be distributed uniformly across NICS closest to a GPU
                             // In RoundRobinMaxMin, MRs will be distributed across NICS closest to a GPU

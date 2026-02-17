@@ -62,7 +62,7 @@ def run_generation_test(name: str,
         temperature=temperature,
         top_p=top_p,
         seed=seed,
-        max_tokens=10
+        max_tokens=1
     )
     # # half prompt for checking
     # half_pompt = prompt[:len(prompt) // 2]
@@ -90,9 +90,14 @@ def run_generation_test(name: str,
     print(f"\n[INFO] Cold time (req 1) [{input_tokens} input tokens: {cold:.3f}s")
     print(f"[INFO] Hot average (req 2-{num_req}) [{input_tokens} input tokens: {hot_avg:.3f}s")
     print(f"[INFO] Total for {num_req} requests: {total:.3f}s")
+    
+    # Print last 10 requests and their average
+    last_10 = times[-10:] if len(times) >= 10 else times
+    last_10_avg = sum(last_10) / len(last_10)
+    print(f"[INFO] Average of last {len(last_10)} requests: {last_10_avg:.3f}s")
 
     del_llm_and_cleanup(llm)
-    return cold, hot_avg, total
+    return cold, hot_avg, total, last_10_avg
 
 def main():
     parser = argparse.ArgumentParser(description="Run LLM generation tests.")
@@ -101,7 +106,7 @@ def main():
         choices=["all", "no", "gpu", "cpu", "lmcache-cpu", "storage","gds-storage", "lmcache-storage", "multi-connector"],
         help="Specify which test to run: all, no, gpu, cpu, lmcache-cpu, storage, lmcache-storage, multi-connector"
     )
-    parser.add_argument("--num-req", type=int, default=6,
+    parser.add_argument("--num-req", type=int, default=50,
                         help="Number of identical requests to run per test (default: 4)")
     parser.add_argument("--block-size", type=int, default=16,
                         help="Token block size (default: 16)")
@@ -134,7 +139,7 @@ def main():
     for config in test_configs:
         try:
             prepare_lmcache_env(config["name"], config.get("test_dir"), block_size=args.block_size)
-            cold, hot_avg, total = run_generation_test(
+            cold, hot_avg, total, last_10_avg = run_generation_test(
                 num_req=args.num_req,
                 num_tokens=args.num_tokens,
                 model_name=args.model,
@@ -142,7 +147,7 @@ def main():
                 tensor_parallel_size=args.tp_size,
                 **config
             )
-            results.append((config["name"], (cold, hot_avg, total)))
+            results.append((config["name"], (cold, hot_avg, total, last_10_avg)))
         except Exception as e:
             print(f"Error running test '{config['name']}': {e}")
             results.append((config["name"], None))
@@ -154,11 +159,12 @@ def main():
     print(f"\n===== Test Summary (block_size: {args.block_size}) =====")
     for name, r in results:
         if r is not None:
-            cold, hot_avg, total = r
+            cold, hot_avg, total, last_10_avg = r
             print(
                 f"{name:<40} | "
                 f"cold: {cold:.2f}s  "
                 f"hot_avg(2-{args.num_req}): {hot_avg:.2f}s  "
+                f"last_10_avg: {last_10_avg:.2f}s  "
                 f"total: {total:.2f}s  "
                 f"[{args.num_tokens} input tokens]"
             )
