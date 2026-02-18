@@ -21,9 +21,9 @@ ARG TARGETPLATFORM
 # Set working directory
 WORKDIR /app
 
-# Copy dependencies and install them
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy project metadata and install dependencies
+COPY pyproject.toml /app/pyproject.toml
+RUN pip install --no-cache-dir .
 
 # Runtime stage
 FROM --platform=$TARGETPLATFORM python:3.10-slim
