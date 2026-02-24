@@ -121,7 +121,7 @@ def get_test_configs(selected_test="all", block_size=16, num_cpu_blocks=50000):
             ),
             "enable_prefix_caching": False,
             "test_dir": shared_storage_path,
-            # "distributed_executor_backend": "mp"
+            "distributed_executor_backend": "mp"
         },
         {
             "name": "GDS-Storage Offloading",
@@ -130,14 +130,14 @@ def get_test_configs(selected_test="all", block_size=16, num_cpu_blocks=50000):
                 kv_role="kv_both",
                 kv_connector_extra_config={"spec_name": "SharedStorageOffloadingSpec",
                                            "block_size": f"{block_size}",
-                                           "threads_per_gpu": "64",
+                                           "threads_per_gpu": "18",
                                            "shared_storage_path": shared_storage_path,
                                            "spec_module_path":"llmd_fs_backend.spec",
                                            "enable_gds": True} 
             ),
             "enable_prefix_caching": False,
             "test_dir": shared_storage_path,
-            # "distributed_executor_backend": "mp"
+            "distributed_executor_backend": "mp"
         },
         {
             "name": "multi-connector",

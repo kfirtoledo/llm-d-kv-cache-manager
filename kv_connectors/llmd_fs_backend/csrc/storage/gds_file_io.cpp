@@ -183,23 +183,29 @@ bool GdsFileIO::register_gpu_buffer(void* gpu_ptr, size_t size, size_t block_siz
     return true;
   }
   
-  // Register buffer in blocks
-  size_t num_blocks = (size + block_size - 1) / block_size;
-  for (size_t i = 0; i < num_blocks; i++) {
-    void* block_ptr = static_cast<uint8_t*>(gpu_ptr) + (i * block_size);
-    size_t current_block_size = std::min(block_size, size - (i * block_size));
+  // Register buffer in larger chunks to avoid GDS registration table overflow
+  // Calculate chunk multiplier to target ~32MB chunks (32MB / block_size)
+  const size_t TARGET_CHUNK_SIZE = 4 * 1024 * 1024;  // 32MB in bytes
+  const size_t CHUNK_MULTIPLIER = 1; // std::max(size_t(1), TARGET_CHUNK_SIZE / block_size);
+  size_t chunk_size = block_size * CHUNK_MULTIPLIER;
+  size_t num_chunks = (size + chunk_size - 1) / chunk_size;
+  
+  FS_LOG_INFO("GDS mode: Registering " << num_chunks << " chunks of " << (chunk_size / (1024.0 * 1024.0)) << " MB each (CHUNK_MULTIPLIER " << CHUNK_MULTIPLIER << ")");
+  
+  for (size_t i = 0; i < num_chunks; i++) {
+    void* block_ptr = static_cast<uint8_t*>(gpu_ptr) + (i * chunk_size);
     
-    //FS_LOG_INFO("  Registering block " << i << "/" << num_blocks << ": ptr " << block_ptr << " size " << current_block_size << " bytes (" << (current_block_size / (1024.0 * 1024.0)) << " MB)");
+    //FS_LOG_INFO("  Registering block " << i << "/" << num_blocks << ": ptr " << block_ptr << " size " << chunk_size << " bytes (" << (current_block_size / (1024.0 * 1024.0)) << " MB)");
     
-    CUfileError_t status = cuFileBufRegister(block_ptr, current_block_size, 0);
+    CUfileError_t status = cuFileBufRegister(block_ptr, chunk_size, CU_FILE_RDMA_REGISTER);
     if (status.err != CU_FILE_SUCCESS) {
       FS_LOG_WARN("GdsFileIO: cuFileBufRegister failed for block " << i << " with error code: " << status.err);
       return false;
     }
 
-    m_registered_buffers[block_ptr] = current_block_size;
+    m_registered_buffers[block_ptr] = chunk_size;
   }
-  FS_LOG_INFO("GDS mode: Registering "  << num_blocks  << " blocks, size " << block_size << " bytes (" << (block_size / (1024.0 * 1024.0)) << " MB)");
+  FS_LOG_INFO("GDS mode: Successfully registered " << num_chunks << " chunks (total " << (size / (1024.0 * 1024.0)) << " MB)");
   return true;
 #else
   return false;

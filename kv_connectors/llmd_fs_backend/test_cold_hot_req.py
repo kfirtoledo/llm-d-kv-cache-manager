@@ -3,7 +3,7 @@ import os
 import time
 import logging
 import gc,torch
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 from transformers import AutoTokenizer
 from tests.test_utils import cleanup_test_dirs, get_test_configs, prepare_lmcache_env, warmup_req, del_llm_and_cleanup
@@ -22,6 +22,24 @@ def build_prompt_exact_tokens(model_name: str, target_tokens: int, seed_text: st
     assert len(tok(prompt, add_special_tokens=False).input_ids) == target_tokens
     return prompt
 
+def build_tokens_prompt(num_tokens: int, prefix_id: int = 1, fill_id: int = 2) -> TokensPrompt:
+    """
+    Build a TokensPrompt directly from token IDs without using tokenizer.
+    
+    Args:
+        num_tokens: Total number of tokens in the prompt
+        prefix_id: Token ID for the first token (default: 1)
+        fill_id: Token ID to fill the rest of the prompt (default: 2)
+    
+    Returns:
+        TokensPrompt object with the specified token IDs
+    
+    Example:
+        For num_tokens=10000, creates: [1, 2, 2, 2, ..., 2] (10000 tokens total)
+    """
+    prompt_token_ids = [prefix_id] + [fill_id] * (num_tokens - 1)
+    return TokensPrompt(prompt_token_ids=prompt_token_ids)
+
 def run_generation_test(name: str,
                         model_name: str,
                         gpu_block_size: int,
@@ -34,13 +52,20 @@ def run_generation_test(name: str,
                         num_req=4,
                         num_tokens=10000,
                         distributed_executor_backend=None,
+                        use_token_ids=False,
                         **kwargs):
     print(f"\n===== Running test: {name} =====")
 
-    # Build an approx num_tokens input prompt
-    # Assuming ~4 chars/token average for English
-    base_sentence = "Once upon a time there was a cat. The cat was big. It was blue. And then suddenly it"
-    prompt = build_prompt_exact_tokens(model_name, num_tokens, base_sentence)
+    # Build prompt - either from text or directly from token IDs
+    if use_token_ids:
+        # Simple token ID-based prompt (faster, no tokenizer needed)
+        prompt = build_tokens_prompt(num_tokens, prefix_id=1, fill_id=2)
+        print(f"[INFO] Using TokensPrompt with {num_tokens} token IDs")
+    else:
+        # Text-based prompt using tokenizer (original method)
+        base_sentence = "Once upon a time there was a cat. The cat was big. It was blue. And then suddenly it"
+        prompt = build_prompt_exact_tokens(model_name, num_tokens, base_sentence)
+        print(f"[INFO] Using text prompt with {num_tokens} tokens")
     max_model_len=max(num_tokens+1000,64000)
     llm = LLM(
         model=model_name,
@@ -59,8 +84,10 @@ def run_generation_test(name: str,
 
     # Main test params
     sampling_params = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
+        #temperature=temperature,
+        #top_p=top_p,
+        detokenize=False,
+        ignore_eos=True,
         seed=seed,
         max_tokens=1
     )
@@ -69,11 +96,14 @@ def run_generation_test(name: str,
     # outputs = llm.generate([half_pompt], sampling_params)
     # print(f" [INFO] generate half prompt")
     
+    logging.getLogger("vllm").setLevel(logging.WARNING)
+    logging.getLogger("vllm.engine").setLevel(logging.WARNING)
+    logging.getLogger("vllm.worker").setLevel(logging.WARNING)
     times = []
     for i in range(num_req):
-        t0 = time.time()
-        outputs = llm.generate([prompt], sampling_params)
-        dt = time.time() - t0
+        t0 = time.perf_counter()
+        outputs = llm.generate([prompt], sampling_params,use_tqdm=False)
+        dt = time.perf_counter() - t0
 
         times.append(dt)
         text = outputs[0].outputs[0].text.strip()
@@ -99,6 +129,42 @@ def run_generation_test(name: str,
     del_llm_and_cleanup(llm)
     return cold, hot_avg, total, last_10_avg
 
+def calculate_throughput(model_name: str, num_tokens: int, gpu_block_size: int, avg_time: float) -> float:
+    """
+    Calculate throughput in GB/s based on model KV cache size.
+    
+    Args:
+        model_name: Name of the model
+        num_tokens: Number of input tokens
+        block_size: Token block size
+        avg_time: Average time in seconds
+    
+    Returns:
+        Throughput in GB/s
+    """
+    # KV cache size per block (16 tokens) in GB
+    # llama-70b: 5GB per 16 tokens
+    # llama-8b: 2GB per 16 tokens
+    
+    if "meta-llama/Meta-Llama-3.1-70B" == model_name:
+        mb_per_block = 5.0
+    elif "meta-llama/Meta-Llama-3.1-8B" == model_name:
+        mb_per_block = 2.0
+    else:
+        return 0
+        
+    
+    # Calculate number of blocks
+    num_blocks = num_tokens / 16
+    
+    # Total data size in GB
+    total_gb = num_blocks * mb_per_block / 1024
+    
+    # Throughput = data size / time
+    throughput = total_gb / avg_time if avg_time > 0 else 0.0
+    
+    return throughput
+
 def main():
     parser = argparse.ArgumentParser(description="Run LLM generation tests.")
     parser.add_argument(
@@ -106,7 +172,7 @@ def main():
         choices=["all", "no", "gpu", "cpu", "lmcache-cpu", "storage","gds-storage", "lmcache-storage", "multi-connector"],
         help="Specify which test to run: all, no, gpu, cpu, lmcache-cpu, storage, lmcache-storage, multi-connector"
     )
-    parser.add_argument("--num-req", type=int, default=50,
+    parser.add_argument("--num-req", type=int, default=40,
                         help="Number of identical requests to run per test (default: 4)")
     parser.add_argument("--block-size", type=int, default=16,
                         help="Token block size (default: 16)")
@@ -119,6 +185,8 @@ def main():
     parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-70B",
                         help="Model name to use for tests (default: meta-llama/Meta-Llama-3.1-8B)")
     parser.add_argument("--tp-size", type=int, default=4,help="Tensor parallel size (default: 4)")
+    parser.add_argument("--use-token-ids",  type=bool, default=True,
+                        help="Use TokensPrompt with token IDs instead of text prompts (faster, no tokenizer needed)")
     args = parser.parse_args()
 
       # Set up debug logging if requested
@@ -145,6 +213,7 @@ def main():
                 model_name=args.model,
                 gpu_block_size= args.gpu_block_size,
                 tensor_parallel_size=args.tp_size,
+                use_token_ids=args.use_token_ids,
                 **config
             )
             results.append((config["name"], (cold, hot_avg, total, last_10_avg)))
@@ -156,15 +225,19 @@ def main():
     cleanup_test_dirs(test_configs)
 
     # Print final summary
-    print(f"\n===== Test Summary (block_size: {args.block_size}) =====")
+    prompt_method = "TokensPrompt (token IDs)" if args.use_token_ids else "Text prompt (tokenizer)"
+    print(f"\n===== Test Summary (offloading_block_size: {args.block_size}, gpu_block_size: {args.gpu_block_size}, prompt: {prompt_method}) =====")
     for name, r in results:
         if r is not None:
             cold, hot_avg, total, last_10_avg = r
+            # Calculate throughput based on last 10 average
+            throughput = calculate_throughput(args.model, args.num_tokens, args.gpu_block_size, last_10_avg)
             print(
                 f"{name:<40} | "
                 f"cold: {cold:.2f}s  "
                 f"hot_avg(2-{args.num_req}): {hot_avg:.2f}s  "
                 f"last_10_avg: {last_10_avg:.2f}s  "
+                f"throughput: {throughput:.2f} GB/s  "
                 f"total: {total:.2f}s  "
                 f"[{args.num_tokens} input tokens]"
             )
