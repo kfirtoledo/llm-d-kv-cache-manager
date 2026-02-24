@@ -198,7 +198,8 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
             job_state->completed_tasks.fetch_add(1);
 
             if (err != cudaSuccess) {
-              FS_LOG_ERROR("cudaStreamSynchronize failed: " << cudaGetErrorString(err));
+              FS_LOG_ERROR(
+                  "cudaStreamSynchronize failed: " << cudaGetErrorString(err));
               // job_state->all_success = false; // TODO- silent
               // ignore read failures for now offloading connector not able to
               // handle failures
@@ -215,17 +216,14 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
               FS_LOG_ERROR("Store failed during file write: " << dst_file);
               return success;
             }
+            return success;
           } catch (const std::exception& e) {
-            FS_LOG_ERROR("Store failed for " << dst_file << ": " << e.what());
-            success = false;
-          } catch (...) {
-            FS_LOG_ERROR("Store failed for " << dst_file << " (unknown exception)");
-            success = false;
+            FS_LOG_ERROR("Exception during store: " << e.what());
+            return false;
           }
-
-          return success;
         },
         TaskPriority::kNormal);
+
     // Convert std::future -> std::shared_future, which is copyable and can
     // be waited on by multiple threads.
     job_state->futures.push_back(future.share());
@@ -250,8 +248,8 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
   for (size_t i = 0; i < src_files.size(); i++) {
     std::string src_file = src_files[i];
     auto block_ids = all_block_ids[i];
-    auto future =
-        m_thread_pool.enqueue([this, src_file, block_ids, job_state]() -> bool {
+    auto future = m_thread_pool.enqueue(
+        [this, src_file, block_ids, job_state]() -> bool {
           StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
           bool success = false;
 
@@ -270,7 +268,8 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
                                 "file:",
                                 src_file);
             if (!success) {
-              FS_LOG_ERROR("Stage1 read_buffer_from_file failed for " << src_file);
+              FS_LOG_ERROR("Stage1 read_buffer_from_file failed for "
+                           << src_file);
               return success;
             }
             // Stage 2:  copy tensors from staging CPU tensor to GPU.
@@ -287,7 +286,8 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
             auto& tls_stream = ThreadPool::get_tls_stream();
             cudaError_t err = cudaStreamSynchronize(tls_stream.stream());
             if (err != cudaSuccess) {
-              FS_LOG_ERROR("cudaStreamSynchronize failed: " << cudaGetErrorString(err));
+              FS_LOG_ERROR(
+                  "cudaStreamSynchronize failed: " << cudaGetErrorString(err));
               return false;
             }
           } catch (const std::exception& e) {
