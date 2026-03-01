@@ -69,7 +69,10 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
         Returns:
             List of completed transfer results.
         """
-        return self.engine.get_finished()
+        return [
+            TransferResult(job_id=job_id, success=success)
+            for job_id, success in self.engine.get_finished()
+        ]
 
     def wait(self, job_ids: set[int]):
         """
