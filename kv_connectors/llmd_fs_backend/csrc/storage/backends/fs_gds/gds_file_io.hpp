@@ -43,10 +43,12 @@ typedef struct CUfileDescr_st {
 class GdsFileIO {
  public:
   // Constructor - initializes and detects GDS support
-  // gpu_buffers: optional list of GPU buffers to pre-register
+  // gpu_buffers: list of GPU buffers to pre-register
   // block_size: size of each block for per-block registration (0 = register entire buffer)
-  GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers = {},
-            size_t block_size = 0);
+  // gds_mode: GDS operation mode (determines if BB mode is used)
+  GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers,
+            size_t block_size,
+            GdsMode gds_mode);
 
   // Destructor - cleanup resources
   ~GdsFileIO();
@@ -56,12 +58,15 @@ class GdsFileIO {
 
   // Static capability check - can be called before construction
   static bool is_gds_supported();
+  
+  // Helper to check if current mode uses Bounce Buffer
+  bool is_bb_mode() const;
 
   // Register GPU buffer for GDS (optional, improves performance)
   // Only effective in GDS mode
   // Note: Buffers are automatically deregistered in destructor
   // block_size: if > 0, register buffer in blocks of this size
-  bool register_gpu_buffer(void* gpu_ptr, size_t size, size_t block_size = 0);
+  bool register_gpu_buffer(void* gpu_ptr, size_t size, size_t block_size);
 
   // Write multiple blocks to a file in a single file-open session
   // Opens file once, writes all blocks sequentially, then closes
@@ -82,6 +87,9 @@ class GdsFileIO {
  private:
   // GDS initialization state
   bool m_gds_initialized;
+  
+  // GDS mode 
+  GdsMode m_gds_mode;
 
   // Registered GPU buffers (for GDS mode)
   std::unordered_map<void*, size_t> m_registered_buffers;
@@ -89,4 +97,7 @@ class GdsFileIO {
   // Initialize GDS driver
   bool initialize_gds();
 };
+
+// Helper function to parse GDS mode string
+GdsMode parse_gds_mode(const std::string& gds_mode_str);
 

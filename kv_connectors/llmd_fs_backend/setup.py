@@ -38,11 +38,20 @@ sources = [
     "csrc/storage/storage_offload.cpp",
     "csrc/storage/storage_offload_bindings.cpp",
     "csrc/storage/numa_utils.cpp",
-    "csrc/storage/file_io.cpp",
+    "csrc/storage/backends/fs_io/file_io.cpp",
     "csrc/storage/thread_pool.cpp",
     "csrc/storage/tensor_copier.cu",
     "csrc/storage/tensor_copier_kernels.cu",
-    "csrc/storage/gds_file_io.cpp",
+    "csrc/storage/backends/fs_gds/gds_file_io.cpp",
+]
+
+# Include directories 
+import os
+base_dir = os.path.dirname(os.path.abspath(__file__))
+include_dirs = [
+    os.path.join(base_dir, "csrc/storage"),
+    os.path.join(base_dir, "csrc/storage/backends/fs_io"),
+    os.path.join(base_dir, "csrc/storage/backends/fs_gds"),
 ]
 
 # Libraries and compile flags
@@ -69,6 +78,7 @@ setup(
         CUDAExtension(
             "storage_offload",
             sources=sources,
+            include_dirs=include_dirs,
             libraries=libraries,
             extra_compile_args={"cxx": cxx_args, "nvcc": nvcc_args},
         ),

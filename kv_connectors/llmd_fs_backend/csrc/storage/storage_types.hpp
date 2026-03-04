@@ -27,3 +27,14 @@ enum class StorageMode {
   CPU_BUFFER_STAGE,  // GPU → CPU buffer → File (traditional)
   GDS_DIRECT         // GPU → File direct (GPUDirect Storage)
 };
+
+// GDS operation mode - controls which operations use GDS
+enum class GdsMode {
+  DISABLED,       // GDS disabled, use CPU staging for both read and write
+  READ_ONLY,      // GDS for reads only, CPU staging for writes
+  WRITE_ONLY,     // GDS for writes only, CPU staging for reads
+  READ_WRITE,     // GDS for both reads and writes
+  BB_READ_ONLY,   // GDS with Bounce Buffer for reads only, CPU staging for writes
+  BB_WRITE_ONLY,  // GDS with Bounce Buffer for writes only, CPU staging for reads
+  BB_READ_WRITE   // GDS with Bounce Buffer for both reads and writes
+};

@@ -56,14 +56,18 @@
 StorageOffloadEngine::StorageOffloadEngine(int io_threads,
                                            int gpu_blocks_per_file,
                                            std::vector<torch::Tensor>& tensors,
-                                           bool enable_gds)
+                                           const std::string& gds_mode_str)
     : m_tensor_copier(tensors, gpu_blocks_per_file),
       m_thread_pool(io_threads,
                     calc_staging_bytes(gpu_blocks_per_file, tensors),
                     get_device_id()),
       m_gpu_blocks_per_file(gpu_blocks_per_file) {
-  // Initialize GDS if enabled
-  if (enable_gds) {
+  
+  // Parse GDS mode string
+  m_gds_mode = parse_gds_mode(gds_mode_str);
+
+  // Initialize GDS if any mode other than DISABLED
+  if (m_gds_mode != GdsMode::DISABLED) {
     // Prepare to register GPU buffer list for GDS registration
     std::vector<std::pair<void*, size_t>> gpu_buffers;
     for (const auto& tensor : tensors) {
@@ -75,22 +79,43 @@ StorageOffloadEngine::StorageOffloadEngine(int io_threads,
     size_t block_size = m_tensor_copier.get_block_size();
     
     // Create GDS with GPU buffers for automatic registration
-    m_gds_io = std::make_unique<GdsFileIO>(gpu_buffers, block_size);
+    m_gds_io = std::make_unique<GdsFileIO>(gpu_buffers, block_size, m_gds_mode);
 
-    // Set storage mode based on whether GDS initialized successfully
+    // Set storage modes based on GDS availability and requested mode
     if (m_gds_io->is_gds_available()) {
-      m_storage_mode = StorageMode::GDS_DIRECT;
-      FS_LOG_INFO("StorageOffloadEngine: Using GDS_DIRECT mode");
+      // Determine read mode
+      if (m_gds_mode == GdsMode::READ_ONLY || m_gds_mode == GdsMode::READ_WRITE ||
+          m_gds_mode == GdsMode::BB_READ_ONLY || m_gds_mode == GdsMode::BB_READ_WRITE) {
+        m_read_storage_mode = StorageMode::GDS_DIRECT;
+      } else {
+        m_read_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+      }
+      
+      // Determine write mode
+      if (m_gds_mode == GdsMode::WRITE_ONLY || m_gds_mode == GdsMode::READ_WRITE ||
+          m_gds_mode == GdsMode::BB_WRITE_ONLY || m_gds_mode == GdsMode::BB_READ_WRITE) {
+        m_write_storage_mode = StorageMode::GDS_DIRECT;
+      } else {
+        m_write_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+      }
+      
+      // Log the configuration
+      std::string mode_str =  m_gds_io->is_bb_mode() ? "BB " : "";
+      FS_LOG_INFO("StorageOffloadEngine: GDS " << mode_str << "mode - READ: "
+                  << (m_read_storage_mode == StorageMode::GDS_DIRECT ? "GDS" : "CPU")
+                  << ", WRITE: "
+                  << (m_write_storage_mode == StorageMode::GDS_DIRECT ? "GDS" : "CPU"));
     } else {
-      m_storage_mode = StorageMode::CPU_BUFFER_STAGE;
-      FS_LOG_INFO("StorageOffloadEngine: GDS initialization failed, "
-                  "falling back to CPU_BUFFER_STAGE mode");
+      m_read_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+      m_write_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+      FS_LOG_WARN("StorageOffloadEngine: GDS initialization failed, "
+                  "falling back to CPU_BUFFER_STAGE mode for both READ and WRITE");
     }
 
   } else {
-    m_storage_mode = StorageMode::CPU_BUFFER_STAGE;
-    FS_LOG_INFO("StorageOffloadEngine: GDS disabled, using "
-                "CPU_BUFFER_STAGE mode");
+    m_read_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+    m_write_storage_mode = StorageMode::CPU_BUFFER_STAGE;
+    FS_LOG_INFO("StorageOffloadEngine: GDS mode 'disabled' - using CPU_BUFFER_STAGE for both READ and WRITE");
   }
 }
 
@@ -217,9 +242,9 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
           auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
           bool success = false;
 
-          // Execute the write operation based on storage mode
+          // Execute the write operation based on write storage mode
           try {
-            switch (m_storage_mode) {
+            switch (m_write_storage_mode) {
               case StorageMode::GDS_DIRECT:
                 // GDS direct write - write directly from GPU memory to file
                 // OPTIMIZED: Open file once, write all blocks sequentially, then close
@@ -317,9 +342,9 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
             // handle failures
           });
 
-          // Execute the read operation based on storage mode
+          // Execute the read operation based on read storage mode
           try {
-            switch (m_storage_mode) {
+            switch (m_read_storage_mode) {
               case StorageMode::GDS_DIRECT:
                 // GDS direct read - read directly from file to GPU memory
                 // OPTIMIZED: Open file once, read all blocks sequentially, then close

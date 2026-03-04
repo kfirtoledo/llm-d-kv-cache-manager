@@ -58,8 +58,12 @@ class StorageOffloadEngine {
   std::unique_ptr<GdsFileIO> m_gds_io;
   // GPU blocks per file (needed for GDS operations)
   int m_gpu_blocks_per_file;
-  // Storage mode (GDS_DIRECT or CPU_BUFFER_STAGE)
-  StorageMode m_storage_mode;
+  // GDS operation mode (controls which operations use GDS)
+  GdsMode m_gds_mode;
+  // Storage mode for read operations
+  StorageMode m_read_storage_mode;
+  // Storage mode for write operations
+  StorageMode m_write_storage_mode;
   // Calculate staging buffer size in bytes
   static size_t calc_staging_bytes(int gpu_blocks_per_file,
                                    const std::vector<torch::Tensor>& tensors);
@@ -71,7 +75,7 @@ class StorageOffloadEngine {
   StorageOffloadEngine(int io_threads,
                        int gpu_blocks_per_file,
                        std::vector<torch::Tensor>& tensors,
-                       bool enable_gds);
+                       const std::string& gds_mode);
   // Return finished jobs and their success status
   std::vector<std::pair<int, bool>> get_finished();
   // Wait for all tasks in the specified job to complete

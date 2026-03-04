@@ -2,7 +2,8 @@ import argparse
 import os
 import time
 import logging
-import gc,torch
+import gc
+import torch
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 from transformers import AutoTokenizer
@@ -66,7 +67,7 @@ def run_generation_test(name: str,
         base_sentence = "Once upon a time there was a cat. The cat was big. It was blue. And then suddenly it"
         prompt = build_prompt_exact_tokens(model_name, num_tokens, base_sentence)
         print(f"[INFO] Using text prompt with {num_tokens} tokens")
-    max_model_len=max(num_tokens+1000,64000)
+    max_model_len = max(num_tokens + 1000, 34000)
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tensor_parallel_size,
@@ -92,8 +93,8 @@ def run_generation_test(name: str,
         max_tokens=1
     )
     # # half prompt for checking
-    # half_pompt = prompt[:len(prompt) // 2]
-    # outputs = llm.generate([half_pompt], sampling_params)
+    # half_prompt = prompt[:len(prompt) // 2]
+    # outputs = llm.generate([half_prompt], sampling_params)
     # print(f" [INFO] generate half prompt")
     
     logging.getLogger("vllm").setLevel(logging.WARNING)
@@ -108,7 +109,7 @@ def run_generation_test(name: str,
         times.append(dt)
         text = outputs[0].outputs[0].text.strip()
         print(f"[{i+1}] {dt:.3f}s | {text[:120].replace('\n',' ')}")
-        if i == 0 and name in ("Storage Offloading","GDS-Storage Offloading"):
+        if i == 0 and name in ("Storage Offloading","GDS-Storage Offloading","GDS-BB-Storage Offloading"):
             time.sleep(5) # wait a bit for storage to settle
         
 
@@ -150,6 +151,8 @@ def calculate_throughput(model_name: str, num_tokens: int, gpu_block_size: int, 
         mb_per_block = 5.0
     elif "meta-llama/Meta-Llama-3.1-8B" == model_name:
         mb_per_block = 2.0
+    elif "Qwen/Qwen3-30B-A3B-Instruct-2507" == model_name:
+        mb_per_block = 0.75
     else:
         return 0
         
@@ -169,8 +172,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run LLM generation tests.")
     parser.add_argument(
         "--test", type=str, default="all",
-        choices=["all", "no", "gpu", "cpu", "lmcache-cpu", "storage","gds-storage", "lmcache-storage", "multi-connector"],
-        help="Specify which test to run: all, no, gpu, cpu, lmcache-cpu, storage, lmcache-storage, multi-connector"
+        choices=["all", "no", "gpu", "cpu", "lmcache-cpu", "storage","gds-storage", "gds-bb-storage", "lmcache-storage", "multi-connector"],
+        help="Specify which test to run: all, no, gpu, cpu, lmcache-cpu, storage, gds-storage, gds-bb-storage, lmcache-storage, multi-connector"
     )
     parser.add_argument("--num-req", type=int, default=40,
                         help="Number of identical requests to run per test (default: 4)")
@@ -183,9 +186,9 @@ def main():
     parser.add_argument("--debug", action="store_true",
                         help="Enable DEBUG logging for vLLM")
     parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-70B",
-                        help="Model name to use for tests (default: meta-llama/Meta-Llama-3.1-8B)")
+                        help="Model name to use for tests (default: meta-llama/Meta-Llama-3.1-70B). Supported: Qwen/Qwen2.5-32B, Qwen/Qwen3-32B, meta-llama/Meta-Llama-3.1-70B, etc.")
     parser.add_argument("--tp-size", type=int, default=4,help="Tensor parallel size (default: 4)")
-    parser.add_argument("--use-token-ids",  type=bool, default=True,
+    parser.add_argument("--use-token-ids", action="store_true", default=True,
                         help="Use TokensPrompt with token IDs instead of text prompts (faster, no tokenizer needed)")
     args = parser.parse_args()
 

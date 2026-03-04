@@ -58,9 +58,9 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 "max_staging_memory_gb", DEFAULT_MAX_STAGING_MEMORY_GB
             )
         )  # Max staging CPU buffer in GB
-        self.enable_gds = bool(
-            self.extra_config.get("enable_gds", False)
-        )  # Enable GPUDirect Storage
+        self.gds_mode = str(
+            self.extra_config.get("gds_mode", "disabled")
+        )  # GDS operation mode: disabled, read_only, write_only, read_write, bb_read_only, bb_write_only, bb_read_write
 
         self.offloaded_block_size = int(
             self.extra_config.get("block_size", DEFAULT_STORAGE_BLOCK_SIZE)
@@ -111,7 +111,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 kv_caches=kv_caches,
                 threads_per_gpu=self.threads_per_gpu,
                 max_staging_memory_gb=self.max_staging_memory_gb,
-                enable_gds=self.enable_gds,
+                gds_mode=self.gds_mode,
             )
 
         assert self._handlers is not None

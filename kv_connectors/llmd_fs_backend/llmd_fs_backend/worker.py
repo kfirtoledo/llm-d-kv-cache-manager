@@ -189,7 +189,7 @@ class StorageOffloadingHandlers:
         gpu_block_size: int,
         gpu_blocks_per_file: int,
         threads_per_gpu: int,
-        enable_gds: bool,
+        gds_mode: str,
         max_staging_memory_gb: int = DEFAULT_MAX_STAGING_MEMORY_GB,
     ):
         threads_per_gpu = min(threads_per_gpu, int(os.cpu_count()))
@@ -217,20 +217,31 @@ class StorageOffloadingHandlers:
                 f"limit (buffer_size_mb={buffer_size_mb})."
             )
 
+        # Validate GDS mode
+        valid_gds_modes = ["disabled", "read_only", "write_only", "read_write",
+                          "bb_read_only", "bb_write_only", "bb_read_write"]
+        if gds_mode not in valid_gds_modes:
+            logger.warning(
+                f"Invalid GDS mode '{gds_mode}', defaulting to 'disabled'. "
+                f"Valid options: {', '.join(valid_gds_modes)}"
+            )
+            gds_mode = "disabled"
+
         # Initialize storage offload resources for async transfers
         self.engine = storage_offload.StorageOffloadEngine(
             io_threads=threads_per_gpu,
             gpu_blocks_per_file=gpu_blocks_per_file,
             tensors=tensors,
-            enable_gds=enable_gds,
+            gds_mode=gds_mode,
         )
 
         logger.info(
             f"StorageOffloadingHandlers: "
-            f"threads_per_gpu={threads_per_gpu},"
+            f"threads_per_gpu={threads_per_gpu}, "
+            f"gds_mode={gds_mode}, "
             f"offloading block_size={gpu_blocks_per_file * gpu_block_size}, "
             f"staging_buffer_size_mb={buffer_size_mb}, "
-            f"max_staging_memory_gb={max_staging_memory_gb}, "
+            f"max_staging_memory_gb={max_staging_memory_gb}"
         )
 
         self.gpu_to_storage_handler = GPUToStorageHandler(

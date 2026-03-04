@@ -29,16 +29,12 @@
 
 namespace fs = std::filesystem;
 
-// Helper function to check if GDS Bounce Buffer mode is enabled via environment variable
-static bool is_gds_bb_enabled() {
-  const char* env_val = std::getenv("USE_GDS_BB");
-  return env_val != nullptr && (std::string(env_val) == "1" || std::string(env_val) == "true");
-}
 
 // Constructor
 GdsFileIO::GdsFileIO(const std::vector<std::pair<void*, size_t>>& gpu_buffers,
-                     size_t block_size)
-    : m_gds_initialized(false) {
+                     size_t block_size,
+                     GdsMode gds_mode)
+    : m_gds_initialized(false), m_gds_mode(gds_mode) {
   if (!is_gds_supported()) {
     FS_LOG_INFO("GdsFileIO: GDS not supported, using CPU buffer staging");
     return;
@@ -81,6 +77,13 @@ GdsFileIO::~GdsFileIO() {
 
   m_gds_initialized = false;
 #endif
+}
+
+// Helper to check if current mode uses Bounce Buffer
+bool GdsFileIO::is_bb_mode() const {
+  return m_gds_mode == GdsMode::BB_READ_ONLY ||
+         m_gds_mode == GdsMode::BB_WRITE_ONLY ||
+         m_gds_mode == GdsMode::BB_READ_WRITE;
 }
 
 // Static capability check
@@ -164,12 +167,12 @@ bool GdsFileIO::register_gpu_buffer(void* gpu_ptr, size_t size, size_t block_siz
   
   FS_LOG_INFO("cuFileBufRegister: gpu_ptr " << gpu_ptr << " size " << size << " bytes (" << (size / (1024.0 * 1024.0)) << " MB)" << (block_size > 0 ? " block_size " + std::to_string(block_size) + " bytes (" + std::to_string(block_size / (1024.0 * 1024.0)) + " MB)" : ""));
    
-  // Check if GDS Bounce Buffer mode is enabled via environment variable
-  bool use_gds_bb = is_gds_bb_enabled();
+  // Check if current GDS mode uses Bounce Buffer
+  bool use_bb = is_bb_mode();
   
-  // If block_size is 0 or GDS_BB mode is enabled, register entire buffer at once
-  if (block_size == 0 || use_gds_bb) {
-    FS_LOG_INFO("GDS with BB mode: Registering entire buffer" << (use_gds_bb ? " (GDS_BB mode)" : "")
+  // If block_size is 0 or BB mode is enabled, register entire buffer at once
+  if (block_size == 0 || use_bb) {
+    FS_LOG_INFO("GDS" << (use_bb ? " with BB mode" : "") << ": Registering entire buffer"
                 << ": ptr " << gpu_ptr << " size " << size << " bytes ("
                 << (size / (1024.0 * 1024.0)) << " MB)");
     
@@ -185,7 +188,7 @@ bool GdsFileIO::register_gpu_buffer(void* gpu_ptr, size_t size, size_t block_siz
   
   // Register buffer in larger chunks to avoid GDS registration table overflow
   // Calculate chunk multiplier to target ~32MB chunks (32MB / block_size)
-  const size_t TARGET_CHUNK_SIZE = 4 * 1024 * 1024;  // 32MB in bytes
+  // const size_t TARGET_CHUNK_SIZE = 4 * 1024 * 1024;  // 32MB in bytes
   const size_t CHUNK_MULTIPLIER = 1; // std::max(size_t(1), TARGET_CHUNK_SIZE / block_size);
   size_t chunk_size = block_size * CHUNK_MULTIPLIER;
   size_t num_chunks = (size + chunk_size - 1) / chunk_size;
@@ -370,4 +373,29 @@ bool GdsFileIO::read_blocks_from_file(const std::string& file_path,
 #else
   return false;
 #endif
+}
+
+// Helper function to parse GDS mode string
+GdsMode parse_gds_mode(const std::string& gds_mode_str) {
+  if (gds_mode_str == "read_only") {
+    return GdsMode::READ_ONLY;
+  } else if (gds_mode_str == "write_only") {
+    return GdsMode::WRITE_ONLY;
+  } else if (gds_mode_str == "read_write") {
+    return GdsMode::READ_WRITE;
+  } else if (gds_mode_str == "bb_read_only") {
+    return GdsMode::BB_READ_ONLY;
+  } else if (gds_mode_str == "bb_write_only") {
+    return GdsMode::BB_WRITE_ONLY;
+  } else if (gds_mode_str == "bb_read_write") {
+    return GdsMode::BB_READ_WRITE;
+  } else {
+    // Default to DISABLED for any other value including "disabled"
+    if (gds_mode_str != "disabled") {
+      FS_LOG_WARN("Unknown GDS mode '" << gds_mode_str << "', defaulting to 'disabled'. "
+                  "Valid options: disabled, read_only, write_only, read_write, "
+                  "bb_read_only, bb_write_only, bb_read_write");
+    }
+    return GdsMode::DISABLED;
+  }
 }

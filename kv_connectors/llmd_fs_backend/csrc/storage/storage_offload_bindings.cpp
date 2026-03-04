@@ -28,11 +28,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "StorageOffloadEngine",
       "Engine for asynchronous KV-cache offloading between GPU memory "
       "and shared storage using background I/O threads.")
-      .def(py::init<int, int, std::vector<torch::Tensor>&, bool>(),
+      .def(py::init<int, int, std::vector<torch::Tensor>&, const std::string&>(),
            py::arg("io_threads"),
            py::arg("gpu_blocks_per_file"),
            py::arg("tensors"),
-           py::arg("enable_gds"),
+           py::arg("gds_mode") = "disabled",
 
            "Create a StorageOffloadEngine instance for asynchronous KV-cache "
            "transfers "
@@ -50,7 +50,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            "  io_threads: Number of background I/O worker threads.\n"
            "  gpu_blocks_per_file: Number of GPU KV-cache blocks per file.\n"
            "  tensors: List of GPU tensors backing the KV-cache.\n"
-           "  enable_gds: choose if to enable gds\n")
+           "  gds_mode: GDS operation mode. Valid options:\n"
+           "    - 'disabled' (default): Use CPU staging for both read and write\n"
+           "    - 'read_only': Use GDS for reads, CPU staging for writes\n"
+           "    - 'write_only': Use GDS for writes, CPU staging for reads\n"
+           "    - 'read_write': Use GDS for both reads and writes\n")
 
       .def("get_finished",
            &StorageOffloadEngine::get_finished,
