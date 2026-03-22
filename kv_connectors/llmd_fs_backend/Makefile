@@ -1,6 +1,7 @@
 PYTHON ?= python3
 WHEEL_DIR = wheels
 DIST_DIR = dist
+VERSION := $(shell $(PYTHON) -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
 
 .PHONY: wheel build test clean
 
@@ -11,7 +12,7 @@ deps:
 # Build wheel into dist/ and copy .whl into wheels/
 wheel: deps
 	$(PYTHON) -m pip wheel . -w $(DIST_DIR)
-	cp $(DIST_DIR)/llmd_fs_connector-*.whl $(WHEEL_DIR)/
+	cp $(DIST_DIR)/llmd_fs_connector-$(VERSION)-*.whl $(WHEEL_DIR)/
 	@echo ""
 	@echo "Wheel created in $(WHEEL_DIR):"
 	@ls -lh $(WHEEL_DIR)
