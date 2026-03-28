@@ -40,6 +40,9 @@ type Config struct {
 	TopicFilter string `json:"topicFilter"`
 	// Concurrency is the number of parallel workers to run.
 	Concurrency int `json:"concurrency"`
+	// EngineType selects the inference engine adapter ("vllm" or "sglang").
+	// Default: "vllm".
+	EngineType string `json:"engineType,omitempty"`
 	// DiscoverPods enables the Kubernetes pod reconciler for automatic
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
