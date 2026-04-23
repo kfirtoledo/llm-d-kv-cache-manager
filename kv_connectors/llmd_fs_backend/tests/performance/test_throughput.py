@@ -224,6 +224,11 @@ def test_throughput(
 # ---------------- standalone CLI ----------------
 
 if __name__ == "__main__":
+    # Example manual runs (see --help for the full flag list):
+    #   # Storage tier - default fs (use CPU staging)
+    #   python -m tests.performance.test_throughput --backend=storage
+    #   # CPU-only baseline
+    #   python -m tests.performance.test_throughput --backend=cpu
     parser = argparse.ArgumentParser(
         description="Run KV-offload throughput test (cold/hot/steady)."
     )

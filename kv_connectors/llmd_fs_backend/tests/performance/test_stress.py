@@ -352,6 +352,11 @@ def test_stress(
 # ---------------- standalone CLI ----------------
 
 if __name__ == "__main__":
+    # Example manual runs (see --help for the full flag list):
+    #   # Storage tier - default fs (use CPU staging)
+    #   python -m tests.performance.test_stress --backend=storage
+    #   # CPU-only baseline
+    #   python -m tests.performance.test_stress --backend=cpu
     parser = argparse.ArgumentParser(
         description=(
             "Run KV-offload batched stress test with hot/cold-ratio sweep. "
