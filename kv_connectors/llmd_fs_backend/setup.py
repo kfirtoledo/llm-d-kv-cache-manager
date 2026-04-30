@@ -56,6 +56,14 @@ nvcc_args = [
 _portable_wheel = os.environ.get("FS_PORTABLE_WHEEL", "").lower() in ("1", "true")
 extra_link_args = ["-static-libstdc++"] if _portable_wheel else []
 
+# Find libcudart and libtorch next to us at runtime (sibling dirs in
+# site-packages), so no LD_LIBRARY_PATH or extra nixl-cu* package is
+# needed to satisfy the libcudart.so.<N> dependency.
+extra_link_args += [
+    "-Wl,-rpath,$ORIGIN/torch/lib",
+    "-Wl,-rpath,$ORIGIN/nvidia/cuda_runtime/lib",
+]
+
 setup(
     name="llmd_fs_connector",
     packages=find_packages(),
