@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# UBI 8 (glibc 2.28) = manylinux_2_28 baseline; multi-arch; no PPA / no
-# api.launchpad.net dependency.
-ARG CUDA_BASE_TAG=12.8.1-devel-ubi8
+# Rocky Linux 8 (glibc 2.28) = manylinux_2_28 baseline; multi-arch; no PPA /
+# no api.launchpad.net dependency.
+ARG CUDA_BASE_TAG=12.8.1-devel-rockylinux8
 FROM nvcr.io/nvidia/cuda:${CUDA_BASE_TAG} AS build
 
 ARG max_jobs=16
@@ -12,10 +12,11 @@ ARG TORCH_CUDA_INDEX=cu128
 ARG WHEEL_LOCAL_VERSION=
 ARG PYTHON_VERSION=3.12
 
-# System build deps. EPEL is required for numactl-devel + patchelf, which
-# UBI 8's default repos don't ship. patchelf is needed by auditwheel.
+# System build deps. patchelf comes from EPEL (auditwheel uses it).
+# numactl-devel lives in Rocky 8's PowerTools repo (disabled by default).
 RUN dnf install -y --setopt=install_weak_deps=False \
-      https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
+      dnf-plugins-core epel-release && \
+    dnf config-manager --set-enabled powertools && \
     dnf install -y --setopt=install_weak_deps=False \
       gcc gcc-c++ make ninja-build \
       numactl-devel \

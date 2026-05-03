@@ -22,10 +22,10 @@ jobs:
             os: ubuntu-24.04
           - arch: arm64
             os: ubuntu-24.04-arm
-          # cu12 uses Dockerfile defaults (CUDA 12.8.1 UBI8 / cu128 /
+          # cu12 uses Dockerfile defaults (CUDA 12.8.1 Rocky 8 / cu128 /
           # no local version). cu130 overrides only what differs:
           - variant: cu130
-            cuda_base_tag: "13.0.0-devel-ubi8"
+            cuda_base_tag: "13.0.0-devel-rockylinux8"
             torch_cuda_index: "cu130"
             wheel_local_version: "+cu130"
 
