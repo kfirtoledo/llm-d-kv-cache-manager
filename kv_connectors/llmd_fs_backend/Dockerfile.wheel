@@ -1,38 +1,34 @@
 # syntax=docker/dockerfile:1
 
-ARG CUDA_VERSION=12.9.1
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS build
+# UBI 8 (glibc 2.28) = manylinux_2_28 baseline; multi-arch; no PPA / no
+# api.launchpad.net dependency.
+ARG CUDA_BASE_TAG=12.8.1-devel-ubi8
+FROM nvcr.io/nvidia/cuda:${CUDA_BASE_TAG} AS build
 
-ARG DEBIAN_FRONTEND=noninteractive
 ARG max_jobs=16
 ARG torch_cuda_arch_list="8.7 8.9 9.0 10.0+PTX"
 ARG TORCH_VERSION=2.10.0
-ARG TORCH_CUDA_INDEX=cu129
+ARG TORCH_CUDA_INDEX=cu128
 ARG WHEEL_LOCAL_VERSION=
+ARG PYTHON_VERSION=3.12
 
-# System deps
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      software-properties-common \
-      curl \
-      git \
-      ca-certificates \
-      build-essential \
-      ninja-build \
-      libnuma-dev && \
-    add-apt-repository -y ppa:deadsnakes/ppa && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      python3.12 \
-      python3.12-dev && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# System build deps. patchelf is required by auditwheel.
+RUN dnf install -y --setopt=install_weak_deps=False \
+      gcc gcc-c++ make ninja-build \
+      numactl-devel \
+      git curl ca-certificates \
+      patchelf \
+      xz \
+    && dnf clean all && rm -rf /var/cache/dnf
 
-# pip for Python 3.12
-RUN curl -sSL https://bootstrap.pypa.io/get-pip.py | python3.12
-
-# Make python/python3 point to 3.12
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
-    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+# Install Python via uv. uv ships standalone, hermetic Python interpreters
+# for both amd64 and arm64, so the same Dockerfile works on every runner
+# without depending on distro Python packaging.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    /root/.local/bin/uv python install ${PYTHON_VERSION} && \
+    /root/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION}
+ENV PATH=/opt/venv/bin:/root/.local/bin:${PATH}
+ENV VIRTUAL_ENV=/opt/venv
 
 # CUDA env (must be set for torch.utils.cpp_extension)
 ENV CUDA_HOME=/usr/local/cuda
@@ -43,8 +39,8 @@ ENV MAX_JOBS=${max_jobs}
 # Enable -static-libstdc++ for the redistributable wheel (read by setup.py).
 ENV FS_PORTABLE_WHEEL=1
 
-# Python build deps
-RUN python -m pip install --upgrade pip setuptools wheel ninja numpy
+# Python build deps + auditwheel.
+RUN python -m pip install --upgrade pip setuptools wheel ninja numpy auditwheel
 
 # Install torch (CUDA index + version controlled by build args).
 RUN python -m pip install --no-cache-dir \
@@ -68,7 +64,27 @@ RUN echo "CUDA_HOME=$CUDA_HOME" && \
     which nvcc && nvcc --version && \
     python -c "import os; print('CUDA_HOME=', os.environ.get('CUDA_HOME')); import torch; print('torch cuda=', torch.version.cuda)"
 
-# Build wheel
-RUN rm -rf build dist *.egg-info wheels && \
-    mkdir -p dist && \
-    python setup.py bdist_wheel -d dist
+# Build wheel as cp38-abi3 (Python 3.8 stable ABI; one .so works on any
+# cpython 3.8+, mirrors vLLM's wheel naming).
+RUN rm -rf build dist-raw dist *.egg-info && \
+    mkdir -p dist-raw dist && \
+    python setup.py bdist_wheel --py-limited-api=cp38 -d dist-raw
+
+# auditwheel: turn the raw linux_<arch> wheel into a manylinux_2_28_<arch>
+# wheel. It bundles small non-system .so deps (e.g. libnuma) into the wheel
+# and verifies no symbol requires glibc > 2.28. torch + CUDA libs are
+# excluded — they're already loaded from the user's torch install at runtime,
+# so bundling them would bloat the wheel by ~2 GB and create conflicting
+# copies of libtorch_cuda / libc10 in the same process.
+RUN auditwheel show dist-raw/*.whl && \
+    auditwheel repair \
+      --plat manylinux_2_28_$(uname -m) \
+      --exclude 'libtorch*.so*' \
+      --exclude 'libc10*.so*' \
+      --exclude 'libcuda*.so*' \
+      --exclude 'libcublas*.so*' \
+      --exclude 'libcublasLt*.so*' \
+      --exclude 'libcufile*.so*' \
+      --exclude 'libnvToolsExt*.so*' \
+      -w dist dist-raw/*.whl && \
+    ls -lh dist/

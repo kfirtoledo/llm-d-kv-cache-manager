@@ -50,11 +50,22 @@ nvcc_args = [
     "-fopenmp",
 ]
 
-# -static-libstdc++ is opt-in via FS_PORTABLE_WHEEL=1 (set by
-# Dockerfile.wheel and `make wheel`); off otherwise to avoid two
-# libstdc++ copies in editable installs, which can segfault.
+# Redistributable-wheel mode (opt-in via FS_PORTABLE_WHEEL=1, set by
+# Dockerfile.wheel and `make wheel`). When enabled:
+#   1. -static-libstdc++ — bundle libstdc++ so the .so doesn't need a
+#      matching system libstdc++ at runtime. Off otherwise: two libstdc++
+#      copies in editable installs can segfault.
+#   2. cp38-abi3 (Py_LIMITED_API=0x03080000) — one .so works on any
+#      cpython >=3.8; wheel tag mirrors vLLM. Off otherwise so editable
+#      installs keep the cpython-specific .so and avoid torch-header
+#      incompatibilities under Py_LIMITED_API.
 _portable_wheel = os.environ.get("FS_PORTABLE_WHEEL", "").lower() in ("1", "true")
 extra_link_args = ["-static-libstdc++"] if _portable_wheel else []
+abi3_kwargs = (
+    {"define_macros": [("Py_LIMITED_API", "0x03080000")], "py_limited_api": True}
+    if _portable_wheel
+    else {}
+)
 
 setup(
     name="llmd_fs_connector",
@@ -67,6 +78,7 @@ setup(
             libraries=libraries,
             extra_compile_args={"cxx": cxx_args, "nvcc": nvcc_args},
             extra_link_args=extra_link_args,
+            **abi3_kwargs,
         ),
     ],
     cmdclass={"build_ext": BuildExtension},
