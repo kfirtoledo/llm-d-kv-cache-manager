@@ -67,11 +67,11 @@ RUN echo "CUDA_HOME=$CUDA_HOME" && \
     which nvcc && nvcc --version && \
     python -c "import os; print('CUDA_HOME=', os.environ.get('CUDA_HOME')); import torch; print('torch cuda=', torch.version.cuda)"
 
-# Build wheel as cp38-abi3 (Python 3.8 stable ABI; one .so works on any
-# cpython 3.8+, mirrors vLLM's wheel naming).
+# Build wheel (cp312-cp312; abi3 isn't viable while we use torch's bundled
+# pybind11 — see the comment in setup.py).
 RUN rm -rf build dist-raw dist *.egg-info && \
     mkdir -p dist-raw dist && \
-    python setup.py bdist_wheel --py-limited-api=cp38 -d dist-raw
+    python setup.py bdist_wheel -d dist-raw
 
 # auditwheel: turn the raw linux_<arch> wheel into a manylinux_2_35_<arch>
 # wheel (matches vLLM's published cu130 / cpu wheels). It bundles small
