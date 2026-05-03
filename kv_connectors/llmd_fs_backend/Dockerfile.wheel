@@ -12,13 +12,15 @@ ARG TORCH_CUDA_INDEX=cu128
 ARG WHEEL_LOCAL_VERSION=
 ARG PYTHON_VERSION=3.12
 
-# System build deps. patchelf is required by auditwheel.
+# System build deps. EPEL is required for numactl-devel + patchelf, which
+# UBI 8's default repos don't ship. patchelf is needed by auditwheel.
 RUN dnf install -y --setopt=install_weak_deps=False \
+      https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
+    dnf install -y --setopt=install_weak_deps=False \
       gcc gcc-c++ make ninja-build \
       numactl-devel \
-      git curl ca-certificates \
       patchelf \
-      xz \
+      git curl ca-certificates xz \
     && dnf clean all && rm -rf /var/cache/dnf
 
 # Install Python via uv. uv ships standalone, hermetic Python interpreters
