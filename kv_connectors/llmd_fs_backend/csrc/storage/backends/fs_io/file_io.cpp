@@ -151,6 +151,7 @@ void FileIO::update_atime(const std::string& path) {
 // Write via CPU staging - wraps copy_blocks + write_buffer_to_file
 bool FileIO::write_blocks_to_file(const std::string& dst_file,
                                   const std::vector<int64_t>& block_ids,
+                                  int group_idx,
                                   cudaStream_t stream) {
   // Get thread-local staging buffer
   StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
@@ -158,10 +159,11 @@ bool FileIO::write_blocks_to_file(const std::string& dst_file,
   bool is_store = true;
 
   // Stage 1: copy tensors from GPU to staging CPU tensor
-  TIME_EXPR("write phase 1: copy_blocks ",
-            m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
-            "file: ",
-            dst_file);
+  TIME_EXPR(
+      "write phase 1: copy_blocks ",
+      m_tensor_copier.copy_blocks(cpu_base, block_ids, group_idx, is_store),
+      "file: ",
+      dst_file);
 
   cudaError_t err = cudaStreamSynchronize(stream);
   if (err != cudaSuccess) {
@@ -189,6 +191,7 @@ bool FileIO::write_blocks_to_file(const std::string& dst_file,
 // Read via CPU staging - wraps read_buffer_from_file + copy_blocks
 bool FileIO::read_blocks_from_file(const std::string& src_file,
                                    const std::vector<int64_t>& block_ids,
+                                   int group_idx,
                                    cudaStream_t stream) {
   // Get thread-local staging buffer
   StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
@@ -208,11 +211,11 @@ bool FileIO::read_blocks_from_file(const std::string& src_file,
   auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
   bool is_store = false;
 
-  success =
-      TIME_EXPR("read phase 2: copy_cpu_tensor_to_gpu_tensors",
-                m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
-                "file: ",
-                src_file);
+  success = TIME_EXPR(
+      "read phase 2: copy_cpu_tensor_to_gpu_tensors",
+      m_tensor_copier.copy_blocks(cpu_base, block_ids, group_idx, is_store),
+      "file: ",
+      src_file);
 
   cudaError_t err = cudaStreamSynchronize(stream);
   if (err != cudaSuccess) {
