@@ -76,9 +76,9 @@ class FileMapper:
         """
         Return the file path for a KV block.
         The path is built using hash-based subdirectories to limit directory
-        fan-out, with the KV group index as a filename suffix so different
-        groups never collide on the same block hash:
-            <base>/<hhh>/<hh>/<hash>_g<group_idx>.bin
+        fan-out, with the KV group index baked into the second-level folder
+        so different groups never collide on the same block hash:
+            <base>/<hhh>/<hh>_g<group_idx>/<hash>.bin
 
         Args:
             key: OffloadKey identifying the KV-cache block.
@@ -89,4 +89,4 @@ class FileMapper:
         hash_hex = get_offload_block_hash(key).hex()
         group_idx = get_offload_group_idx(key)
         subfolder1, subfolder2 = hash_hex[:3], hash_hex[3:5]
-        return f"{self.base_path}/{subfolder1}/{subfolder2}/{hash_hex}_g{group_idx}.bin"
+        return f"{self.base_path}/{subfolder1}/{subfolder2}_g{group_idx}/{hash_hex}.bin"

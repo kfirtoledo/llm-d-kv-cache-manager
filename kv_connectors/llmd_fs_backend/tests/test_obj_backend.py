@@ -149,7 +149,7 @@ def roundtrip_once_obj(
 
     put_gpu_specs = make_gpu_specs(write_block_ids)
     put_num_files = math.ceil(len(write_block_ids) / gpu_blocks_per_file)
-    put_storage_specs, block_hashes = make_storage_specs(put_num_files)
+    put_storage_specs, keys = make_storage_specs(put_num_files)
 
     # PUT phase
     put_handlers = NixlStorageOffloadingHandlers(
@@ -184,10 +184,8 @@ def roundtrip_once_obj(
 
     get_gpu_specs = make_gpu_specs(read_block_ids)
     get_num_files = math.ceil(len(read_block_ids) / gpu_blocks_per_file)
-    start_index = len(put_storage_specs.block_hashes) - get_num_files
-    get_storage_spec = SharedStorageLoadStoreSpec(
-        put_storage_specs.block_hashes[start_index:]
-    )
+    start_index = len(put_storage_specs.keys) - get_num_files
+    get_storage_spec = SharedStorageLoadStoreSpec(put_storage_specs.keys[start_index:])
     start_get = time.time()
     get_handler.transfer_async(job_id=2, spec=(get_storage_spec, get_gpu_specs))
     get_result = wait_for(get_handler, job_id=2, timeout=30.0)
