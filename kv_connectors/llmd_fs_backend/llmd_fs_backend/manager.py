@@ -16,7 +16,7 @@ import os
 from collections.abc import Iterable
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingManager,
     OffloadKey,

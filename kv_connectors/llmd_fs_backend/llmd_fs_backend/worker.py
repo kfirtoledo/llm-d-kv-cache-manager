@@ -19,9 +19,11 @@ from typing import Protocol, runtime_checkable
 
 import storage_offload
 import torch
-from vllm.v1.kv_offload.abstract import get_offload_group_idx
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
-from vllm.v1.kv_offload.spec import CanonicalKVCaches
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    GPULoadStoreSpec,
+    get_offload_group_idx,
+)
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
