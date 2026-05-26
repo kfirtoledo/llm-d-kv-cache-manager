@@ -53,11 +53,23 @@ class FileIO : public StorageHandler {
  private:
   TensorCopier& m_tensor_copier;
 
-  // Write a buffer to disk using a temporary file and atomic rename
+  // Write `write_size` bytes from buf.ptr+write_offset to disk via temp file +
+  // atomic rename. Caller is responsible for ensuring [write_offset,
+  // write_offset+write_size) lies inside the staging buffer.
   static bool write_buffer_to_file(const StagingBufferInfo& buf,
-                                   const std::string& target_path);
+                                   const std::string& target_path,
+                                   size_t write_offset,
+                                   size_t write_size);
 
-  // Read a file into a thread-local staging buffer
+  // Read `blocks_in_file` blocks (each `bytes_per_block` bytes) from `path`
+  // into `buf` at byte offset `buf_offset`. The file on disk may contain
+  // up to gpu_blocks_per_file blocks; if it has more than `blocks_in_file`,
+  // we read the TAIL (last `blocks_in_file` blocks) to match the
+  // back-of-buffer / back-of-file convention used by tensor_copier and the
+  // partial-file write path.
   static bool read_buffer_from_file(const std::string& path,
-                                    StagingBufferInfo& buf);
+                                    StagingBufferInfo& buf,
+                                    size_t buf_offset,
+                                    size_t bytes_per_block,
+                                    size_t blocks_in_file);
 };

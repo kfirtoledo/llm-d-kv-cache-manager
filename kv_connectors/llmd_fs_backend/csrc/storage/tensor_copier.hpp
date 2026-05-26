@@ -47,6 +47,13 @@ class TensorCopier {
   size_t num_tensors_for_group(int group_idx) const {
     return m_group_tensor_indices[group_idx].size();
   }
+  // Number of GPU blocks bundled into a single file.
+  int gpu_blocks_per_file() const { return m_gpu_blocks_per_file; }
+  // Total bytes of actual KV data for one block of the given group
+  // (sums per-tensor block bytes across all tensors in the group).
+  size_t bytes_per_block_for_group(int group_idx) const {
+    return num_tensors_for_group(group_idx) * m_tensor_block_size;
+  }
 
  private:
   // GPU tensor list (flat, canonical)

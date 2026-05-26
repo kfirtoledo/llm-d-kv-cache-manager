@@ -279,11 +279,21 @@ class GPUToStorageHandler(BaseStorageOffloadingHandler):
         if not dst_files:
             return False
 
+        total_blocks = sum(len(ids) for ids in per_file_block_ids)
+        # INFO so it surfaces without STORAGE_LOG_LEVEL=DEBUG; "Transfer
+        # finished" still requires DEBUG because completion lines are noisier
+        # and only fire when get_finished() is polled.
+        logger.info(
+            "PUT started: job_id=%d files=%d blocks=%d size=%.2f [MB]",
+            job_id,
+            len(dst_files),
+            total_blocks,
+            total_blocks * self.per_block_bytes / (1 << 20),
+        )
         success = self.engine.async_store_gpu_blocks(
             job_id, group_indices, dst_files, per_file_block_ids
         )
         if success:
-            total_blocks = sum(len(ids) for ids in per_file_block_ids)
             self._record_job(job_id, total_blocks)
         return success
 
@@ -303,11 +313,18 @@ class StorageToGPUHandler(BaseStorageOffloadingHandler):
         if not src_files:
             return False
 
+        total_blocks = sum(len(ids) for ids in per_file_block_ids)
+        logger.info(
+            "GET started: job_id=%d files=%d blocks=%d size=%.2f [MB]",
+            job_id,
+            len(src_files),
+            total_blocks,
+            total_blocks * self.per_block_bytes / (1 << 20),
+        )
         success = self.engine.async_load_gpu_blocks(
             job_id, group_indices, src_files, per_file_block_ids
         )
         if success:
-            total_blocks = sum(len(ids) for ids in per_file_block_ids)
             self._record_job(job_id, total_blocks)
         return success
 

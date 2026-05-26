@@ -46,9 +46,22 @@ thread_local std::string tmp_file_suffix =
 // -------------------------------------------------------------------
 // file-IO Functions
 // -------------------------------------------------------------------
-// Write a buffer to disk using a temporary file and atomic rename
+// Write `write_size` bytes starting at buf.ptr+write_offset to disk via a
+// temporary file and atomic rename. The staging buffer is sized for the
+// worst-case (largest group × gpu_blocks_per_file) transfer, but each
+// specific (group, blocks) write only fills part of it — writing the whole
+// buffer would pad files with garbage and inflate disk usage Nx, especially
+// for HMA where smaller groups still got max-group-padded files.
 bool FileIO::write_buffer_to_file(const StagingBufferInfo& buf,
-                                  const std::string& target_path) {
+                                  const std::string& target_path,
+                                  size_t write_offset,
+                                  size_t write_size) {
+  if (!buf.ptr || write_offset + write_size > buf.size) {
+    FS_LOG_ERROR("write_buffer_to_file: bad range for "
+                 << target_path << " (offset=" << write_offset
+                 << " size=" << write_size << " buf.size=" << buf.size << ")");
+    return false;
+  }
   // Create parent directory if needed
   fs::path file_path(target_path);
   fs::path parent_dir = file_path.parent_path();
@@ -73,8 +86,8 @@ bool FileIO::write_buffer_to_file(const StagingBufferInfo& buf,
   // Apply the custom buffer to the file stream
   ofs.rdbuf()->pubsetbuf(thread_write_buffer.data(), WRITE_BUFFER_SIZE);
 
-  // Write file contents
-  ofs.write(reinterpret_cast<const char*>(buf.ptr), buf.size);
+  // Write only the actual data region of the staging buffer.
+  ofs.write(reinterpret_cast<const char*>(buf.ptr) + write_offset, write_size);
   if (!ofs) {
     FS_LOG_ERROR("Failed to write to temporary file: " << tmp_path << " - "
                                                        << std::strerror(errno));
@@ -100,40 +113,59 @@ bool FileIO::write_buffer_to_file(const StagingBufferInfo& buf,
   return true;
 }
 
-// Read a file into a thread-local staging buffer
+// Read `blocks_in_file` blocks (each `bytes_per_block` bytes) from `path`
+// into `buf` at byte offset `buf_offset`. The file on disk may have more
+// blocks than requested (when a previous full write was followed by a
+// partial read); in that case we read from the END of the file so the
+// back-of-buffer convention used by copy_blocks() and write_buffer_to_file()
+// is preserved.
 bool FileIO::read_buffer_from_file(const std::string& path,
-                                   StagingBufferInfo& buf) {
-  // Open file
+                                   StagingBufferInfo& buf,
+                                   size_t buf_offset,
+                                   size_t bytes_per_block,
+                                   size_t blocks_in_file) {
+  // Open file and grab its size in one pass (ios::ate).
   std::ifstream ifs(path, std::ios::in | std::ios::binary | std::ios::ate);
   if (!ifs) {
     FS_LOG_ERROR("Failed to open file: " << path);
     return false;
   }
-
-  // Determine file size
   std::ifstream::pos_type end_pos = ifs.tellg();
   if (end_pos == std::streampos(-1)) {
     FS_LOG_ERROR("Failed to determine file size: " << path);
     return false;
   }
   size_t file_size = static_cast<size_t>(end_pos);
-  ifs.seekg(0, std::ios::beg);  // Move read pointer to start for reading
 
-  // Acquire staging buffer of the required size
-  if (!buf.ptr || buf.size < file_size) {
-    FS_LOG_ERROR("Staging buffer too small for file: "
-                 << path << " (required=" << file_size
-                 << " available=" << buf.size << " ptr=" << buf.ptr << ")");
+  // File must hold at least the blocks the caller is asking for.
+  size_t read_size = blocks_in_file * bytes_per_block;
+  if (file_size < read_size) {
+    FS_LOG_ERROR("File too small: " << path << " (file_size=" << file_size
+                                    << " required=" << read_size << ")");
     return false;
   }
 
-  // Read file into Staging buffer
-  ifs.read(reinterpret_cast<char*>(buf.ptr),
-           static_cast<std::streamsize>(file_size));
+  // If file_size > read_size (file written full, partial read), seek to
+  // the END minus the requested span — back-of-file convention.
+  size_t file_offset = file_size - read_size;
+  ifs.seekg(static_cast<std::streamoff>(file_offset), std::ios::beg);
+
+  // Bounds check destination buffer.
+  if (!buf.ptr || buf.size < buf_offset + read_size) {
+    FS_LOG_ERROR("Staging buffer too small for file: "
+                 << path << " (buf_offset=" << buf_offset
+                 << " required=" << read_size << " available=" << buf.size
+                 << " ptr=" << buf.ptr << ")");
+    return false;
+  }
+
+  ifs.read(reinterpret_cast<char*>(buf.ptr) + buf_offset,
+           static_cast<std::streamsize>(read_size));
   std::streamsize bytes_read = ifs.gcount();
-  if (bytes_read != static_cast<std::streamsize>(file_size) || !ifs.good()) {
-    FS_LOG_ERROR("Failed to read full file: " << path << " (read " << bytes_read
-                                              << "/" << file_size << " bytes)");
+  if (bytes_read != static_cast<std::streamsize>(read_size) || !ifs.good()) {
+    FS_LOG_ERROR("Failed to read tail: "
+                 << path << " (read " << bytes_read << "/" << read_size
+                 << " bytes from offset " << file_offset << ")");
     return false;
   }
 
@@ -172,13 +204,24 @@ bool FileIO::write_blocks_to_file(const std::string& dst_file,
     return false;
   }
 
-  // Stage 2: Write the cpu tensor to disk
-  bool success = TIME_EXPR("write phase 2: write_buffer_to_file",
-                           write_buffer_to_file(buf, dst_file),
-                           "file:",
-                           dst_file,
-                           " size:",
-                           buf.size);
+  // Stage 2: Write only the actual KV data to disk.
+  // The staging buffer is sized for the worst-case group; the real data for
+  // this (group, blocks) lives in the back-of-buffer slot used by
+  // copy_blocks (see tensor_copier.cu). Compute that slot and persist just
+  // those bytes so file size on disk matches the real KV footprint.
+  size_t bytes_per_block = m_tensor_copier.bytes_per_block_for_group(group_idx);
+  size_t blocks_in_file = block_ids.size();
+  size_t write_offset =
+      (m_tensor_copier.gpu_blocks_per_file() - blocks_in_file) *
+      bytes_per_block;
+  size_t write_size = blocks_in_file * bytes_per_block;
+  bool success =
+      TIME_EXPR("write phase 2: write_buffer_to_file",
+                write_buffer_to_file(buf, dst_file, write_offset, write_size),
+                "file:",
+                dst_file,
+                " size:",
+                write_size);
 
   if (!success) {
     FS_LOG_ERROR(
@@ -196,9 +239,21 @@ bool FileIO::read_blocks_from_file(const std::string& src_file,
   // Get thread-local staging buffer
   StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
 
-  // Stage 1: Read file to staging CPU tensor
+  // Stage 1: Read the last `blocks_in_file` blocks from disk and place
+  // them at the back-of-buffer slot copy_blocks() reads from. A file may
+  // have been written with the full gpu_blocks_per_file count earlier and
+  // be partially read now (e.g., start_idx > 0 on GET), so the read helper
+  // seeks to the tail.
+  size_t bytes_per_block = m_tensor_copier.bytes_per_block_for_group(group_idx);
+  size_t blocks_in_file = block_ids.size();
+  size_t buf_offset = (m_tensor_copier.gpu_blocks_per_file() - blocks_in_file) *
+                      bytes_per_block;
   bool success = TIME_EXPR("read phase 1: read_buffer_from_file",
-                           read_buffer_from_file(src_file, buf),
+                           read_buffer_from_file(src_file,
+                                                 buf,
+                                                 buf_offset,
+                                                 bytes_per_block,
+                                                 blocks_in_file),
                            "file:",
                            src_file);
   if (!success) {
