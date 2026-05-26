@@ -69,6 +69,10 @@ class TensorCopier {
   bool m_use_kernel_copy_write;
   // Use kernel-based copy for get operations
   bool m_use_kernel_copy_read;
+  // Use cudaMemcpyBatchAsync (CUDA 12.8+) for put operations
+  bool m_use_batch_memcpy_write;
+  // Use cudaMemcpyBatchAsync (CUDA 12.8+) for get operations
+  bool m_use_batch_memcpy_read;
 
   // Performs block transfers using cudaMemcpyAsync (DMA-based copy)
   void copy_blocks_via_cuda_memcpy(uint8_t* cpu_base,
@@ -81,4 +85,13 @@ class TensorCopier {
                                const std::vector<int64_t>& block_ids_list,
                                int group_idx,
                                bool is_store);
+
+  // Performs block transfers using a single cudaMemcpyBatchAsync call
+  // (CUDA 12.8+). Submits all (block, layer) copies in one driver request
+  // instead of N cudaMemcpyAsync calls — eliminates per-call dispatch
+  // overhead. Mirrors vLLM's simple_kv_offload cuMemcpyBatchAsync path.
+  void copy_blocks_via_batch_memcpy(uint8_t* cpu_base,
+                                    const std::vector<int64_t>& block_ids_list,
+                                    int group_idx,
+                                    bool is_store);
 };

@@ -10,7 +10,6 @@ This backend provides a shared-storage offloading layer for vLLM. It moves KV-ca
 - Multiple I/O worker threads
 - NUMA-aware CPU scheduling of worker threads
 - Atomic file writes and reads
-- HMA (Hybrid Memory Architecture) support for models with multiple KV cache groups (e.g., full attention + sliding window + Mamba)
 
 The fs connector is suitable for shared storage, as well as a local disk.
 
@@ -101,6 +100,8 @@ make image-fs-backend-push IMAGE_TAG_BASE=<your-base-container-registry> FS_BACK
 - `STORAGE_CONNECTOR_DEBUG`: legacy flag — setting to `1` enables debug-level logging (equivalent to `STORAGE_LOG_LEVEL=debug`)
 - `USE_KERNEL_COPY_WRITE` : enable GPU-kernel-based writes using GPU SMs (default 0 - uses DMA copy).
 - `USE_KERNEL_COPY_READ`: enable GPU-kernel-based reads using GPU SMs (default 0 - uses DMA copy).
+- `USE_BATCH_MEMCPY_WRITE`: submit all per-(block, layer) copies in one `cudaMemcpyBatchAsync` call on writes (default 1, requires CUDA 12.8+; set to 0 to fall back to the per-call DMA loop).
+- `USE_BATCH_MEMCPY_READ`: same as above for reads (default 1).
 
 ## Example vLLM YAML
 
