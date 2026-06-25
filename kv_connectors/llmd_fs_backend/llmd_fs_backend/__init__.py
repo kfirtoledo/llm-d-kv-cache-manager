@@ -18,6 +18,7 @@ import os
 from vllm.logger import init_logger
 
 from llmd_fs_backend.metrics import install_offload_metric_suffix_patch
+from llmd_fs_backend.phase_timing import install_connector_phase_timing_patch
 
 # Apply the OffloadPromMetrics spec-suffix patch before any OffloadingConnector
 # is instantiated. Required so MultiConnector can nest two OffloadingConnector
@@ -25,6 +26,11 @@ from llmd_fs_backend.metrics import install_offload_metric_suffix_patch
 # TODO: remove once vLLM upstream applies an equivalent spec_name suffix
 # to the OffloadPromMetrics names.
 install_offload_metric_suffix_patch()
+
+# In trace mode (STORAGE_LOG_LEVEL=TRACE/DEBUG), time each OffloadingConnector
+# phase (lookup / read / write / poll / ...) so the parts sum to the total time
+# a request spends inside the connector. No-op otherwise.
+install_connector_phase_timing_patch()
 
 _LEVEL_MAP = {
     "TRACE": logging.DEBUG,

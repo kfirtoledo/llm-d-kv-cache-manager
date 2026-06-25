@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
+import time
 from collections.abc import Collection
 
 from vllm.logger import init_logger
@@ -33,6 +35,21 @@ from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
 
 logger = init_logger(__name__)
 
+# Block round-trip lifetime tracing is active only when STORAGE_LOG_LEVEL is
+# TRACE/DEBUG. It records, per offloaded block, the wall-clock between the
+# moment the block finishes being WRITTEN (complete_store) and the moment a
+# later request asks the connector to LOAD it (prepare_load) — i.e. how long a
+# KV block lives on the storage tier before it is reused. When the env var is
+# not set to a trace level we skip the bookkeeping entirely (zero overhead).
+_TRACE_ENABLED = os.environ.get("STORAGE_LOG_LEVEL", "INFO").upper() in (
+    "TRACE",
+    "DEBUG",
+)
+if _TRACE_ENABLED:
+    # init_logger may leave this child logger at a non-trace level; force it so
+    # the block_roundtrip line actually reaches the handler in trace mode.
+    logger.setLevel(logging.DEBUG)
+
 
 class SharedStorageOffloadingManager(OffloadingManager):
     """
@@ -46,6 +63,9 @@ class SharedStorageOffloadingManager(OffloadingManager):
         event_publisher=None,
     ) -> None:
         self.file_mapper: FileMapper = file_mapper
+        # block hash -> monotonic time the block finished being written.
+        # Populated only in trace mode; used to measure write->load round-trip.
+        self._block_write_times: dict[bytes, float] = {}
         self._event_publisher = (
             event_publisher
             if event_publisher is not None
@@ -119,7 +139,37 @@ class SharedStorageOffloadingManager(OffloadingManager):
         """
         For shared storage, loading is stateless - return specs that point to files.
         """
+        if _TRACE_ENABLED:
+            self._record_roundtrips(keys)
         return SharedStorageLoadStoreSpec(keys)
+
+    def _record_roundtrips(self, keys: Collection[OffloadKey]) -> None:
+        """Emit per-request block round-trip lifetimes (trace mode only).
+
+        For every key being loaded that we previously recorded a write time
+        for, the lifetime is `now - write_time`: how long the block sat on the
+        storage tier between being written and this reuse load. Aggregated into
+        a single `block_roundtrip:` line per prepare_load call so the test
+        harness can tally it from stderr.
+        """
+        now = time.monotonic()
+        lifetimes = [
+            now - w
+            for k in keys
+            if (w := self._block_write_times.get(get_offload_block_hash(k)))
+            is not None
+        ]
+        if not lifetimes:
+            return
+        n = len(lifetimes)
+        logger.debug(
+            "block_roundtrip: blocks=%d lifetime_avg=%.4f lifetime_min=%.4f "
+            "lifetime_max=%.4f [s]",
+            n,
+            sum(lifetimes) / n,
+            min(lifetimes),
+            max(lifetimes),
+        )
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
@@ -166,6 +216,10 @@ class SharedStorageOffloadingManager(OffloadingManager):
         """
         if success:
             self._publish_blocks_stored(keys)
+            if _TRACE_ENABLED:
+                now = time.monotonic()
+                for k in keys:
+                    self._block_write_times[get_offload_block_hash(k)] = now
 
     def shutdown(self) -> None:
         if self._event_publisher is not None:
